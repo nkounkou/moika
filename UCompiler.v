@@ -277,8 +277,8 @@ Fixpoint compile_action {sig R V A} (a : action sig R V A)
                    (cc_pair (compile_action l) (compile_action r))
                    (cc_pair
                       (cc_or (FinL (FinL Fin1)) (FinR (FinL Fin1)) (cc_out [FinR Fin1]))
-                      (cc_pair
-                         (cc_pair
+                      (cc_pair (* RRR + AAA *) 
+                         (cc_pair (* RRR *)
                             (cc_pair
                                (build (fun r => cc_or
                                                   (FinL (FinR (FinL (FinL (FinL r)))))
@@ -297,7 +297,11 @@ Fixpoint compile_action {sig R V A} (a : action sig R V A)
                                                   (FinL (FinR (FinR (FinL (FinR r)))))
                                                   (cc_or (FinL (FinR Fin1)) (FinR Fin1)
                                                      (cc_out [FinR Fin1]))))))
-                         _))
+                         (cc_pair (* AAA *)
+                            (cc_pair
+                               _
+                               _)
+                            _)))
   | a_if c t f => cc_connect (* N = 2 + ((1 + (RRR + AAA)) + (1 + (RRR + AAA))) *)
                     (cc_pair
                        (cc_map FinL (compile_value c))
@@ -305,21 +309,47 @@ Fixpoint compile_action {sig R V A} (a : action sig R V A)
                     (cc_pair
                        (cc_mux (FinL Fin1) (FinR (FinL (FinL Fin1))) (FinR (FinR (FinL Fin1)))
                           (cc_or (FinL (FinL Fin2)) (FinR Fin1) (cc_out [FinR Fin1])))
-                       (cc_pair
-                          _
-                          _))
-  | a_write _ arg => cc_let
+                       (cc_pair (* RRR + AAA *)
+                          (cc_pair (* RRR *)
+                             (cc_pair
+                                _
+                                _)
+                             _)
+                          (cc_pair (* AAA *)
+                             (cc_pair
+                                _
+                                _)
+                             _)))
+  | a_write _ arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
                        (cc_map FinL (compile_value arg))
-                       (cc_pair (cc_out [FinR Fin2])
-                          (cc_pair
-                             _
-                             _))
-  | a_call _ arg => cc_let
+                       (cc_pair
+                          (cc_out [FinR Fin2])
+                          (cc_pair (* RRR + AAA *)
+                             (cc_pair (* RRR *)
+                                (cc_pair
+                                   _
+                                   _)
+                                _)
+                             (cc_pair (* AAA *)
+                                (cc_pair
+                                   _
+                                   _)
+                                _)))
+  | a_call _ arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
                       (cc_map FinL (compile_value arg))
-                      (cc_pair (cc_out [FinR Fin2])
-                         (cc_pair
-                            _
-                            _))
+                      (cc_pair
+                         (cc_out [FinR Fin2])
+                         (cc_pair (* RRR + AAA *)
+                            (cc_pair (* RRR *)
+                               (cc_pair
+                                  _
+                                  _)
+                               _)
+                            (cc_pair (* AAA *)
+                               (cc_pair
+                                  _
+                                  _)
+                               _)))
   | a_abort => cc_bool true (cc_bool false (cc_out (FinL (FinR Fin1) :: rep (FinR Fin1))))
   end.
 
