@@ -172,6 +172,13 @@ Fixpoint cc_let {I O O'} (cc_expr : comb_circuit I O) (cc_body : comb_circuit (I
   | cc_mux sel tru fal tl => cc_mux sel tru fal (cc_let tl (cc_map flet1 cc_body))
   end.
 
+(* TODOC *)
+Fixpoint cc_build {n I} (f : Fin.t n -> comb_circuit I 1) : comb_circuit I n :=
+  match n as n return (Fin.t n -> comb_circuit I 1) -> comb_circuit I n with
+  | 0 => fun _ => cc_out []
+  | S n' => fun f => cc_pair (f Fin.F1) (cc_build (fun p => f (Fin.FS p)))
+  end f.
+
 (* VALUE *)
 
 (* a language value *)
@@ -280,28 +287,42 @@ Fixpoint compile_action {sig R V A} (a : action sig R V A)
                       (cc_pair (* RRR + AAA *) 
                          (cc_pair (* RRR *)
                             (cc_pair
-                               (build (fun r => cc_or
+                               (cc_build (fun r => cc_or
+                                                     (FinL (FinR (FinL (FinL (FinL r)))))
+                                                     (FinR (FinR (FinL (FinL (FinL r)))))
+                                                     (cc_out [FinR Fin1])))
+                               (cc_build (fun r => cc_mux
+                                                     (FinL (FinR (FinL (FinL (FinL r)))))
+                                                     (FinL (FinR (FinL (FinL (FinR r)))))
+                                                     (FinR (FinR (FinL (FinL (FinR r)))))
+                                                     (cc_out [FinR Fin1]))))
+                            (cc_build (fun r => cc_and
                                                   (FinL (FinR (FinL (FinL (FinL r)))))
                                                   (FinR (FinR (FinL (FinL (FinL r)))))
-                                                  (cc_out [FinR Fin1])))
-                               (build (fun r => cc_mux
-                                                  (FinL (FinR (FinL (FinL (FinL r)))))
-                                                  (FinL (FinR (FinL (FinL (FinR r)))))
-                                                  (FinR (FinR (FinL (FinL (FinR r)))))
-                                                  (cc_out [FinR Fin1]))))
-                            (build (fun r => cc_and
-                                               (FinL (FinR (FinL (FinL (FinL r)))))
-                                               (FinR (FinR (FinL (FinL (FinL r)))))
-                                               (cc_or
-                                                  (FinL (FinL (FinR (FinL (FinR r)))))
-                                                  (FinL (FinR (FinR (FinL (FinR r)))))
-                                                  (cc_or (FinL (FinR Fin1)) (FinR Fin1)
-                                                     (cc_out [FinR Fin1]))))))
+                                                  (cc_or
+                                                     (FinL (FinL (FinR (FinL (FinR r)))))
+                                                     (FinL (FinR (FinR (FinL (FinR r)))))
+                                                     (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                        (cc_out [FinR Fin1]))))))
                          (cc_pair (* AAA *)
                             (cc_pair
-                               _
-                               _)
-                            _)))
+                               (cc_build (fun a => cc_or
+                                                     (FinL (FinR (FinR (FinL (FinL a)))))
+                                                     (FinR (FinR (FinR (FinL (FinL a)))))
+                                                     (cc_out [FinR Fin1])))
+                               (cc_build (fun a => cc_mux
+                                                     (FinL (FinR (FinR (FinL (FinL a)))))
+                                                     (FinL (FinR (FinR (FinL (FinR a)))))
+                                                     (FinR (FinR (FinR (FinL (FinR a)))))
+                                                     (cc_out [FinR Fin1]))))
+                            (cc_build (fun a => cc_and
+                                                  (FinL (FinR (FinR (FinL (FinL a)))))
+                                                  (FinR (FinR (FinR (FinL (FinL a)))))
+                                                  (cc_or
+                                                     (FinL (FinL (FinR (FinR (FinR a)))))
+                                                     (FinL (FinR (FinR (FinR (FinR a)))))
+                                                     (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                        (cc_out [FinR Fin1]))))))))
   | a_if c t f => cc_connect (* N = 2 + ((1 + (RRR + AAA)) + (1 + (RRR + AAA))) *)
                     (cc_pair
                        (cc_map FinL (compile_value c))
@@ -309,149 +330,113 @@ Fixpoint compile_action {sig R V A} (a : action sig R V A)
                     (cc_pair
                        (cc_mux (FinL Fin1) (FinR (FinL (FinL Fin1))) (FinR (FinR (FinL Fin1)))
                           (cc_or (FinL (FinL Fin2)) (FinR Fin1) (cc_out [FinR Fin1])))
-                       (cc_pair (* RRR + AAA *)
-                          (cc_pair (* RRR *)
-                             (cc_pair
-                                _
-                                _)
-                             _)
-                          (cc_pair (* AAA *)
-                             (cc_pair
-                                _
-                                _)
-                             _)))
-  | a_write _ arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
+                       (cc_not (FinL Fin1)
+                          (cc_pair (* RRR + AAA *)
+                             (cc_pair (* RRR *)
+                                (cc_pair
+                                   (cc_build
+                                      (fun r =>
+                                         cc_and
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinL (FinL (FinL r)))))))
+                                           (cc_and
+                                              (FinL (FinR Fin1))
+                                              (FinL (FinL (FinR (FinR (FinR (FinL (FinL (FinL r))))))))
+                                              (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                 (cc_out [FinR Fin1])))))
+                                   (cc_build
+                                      (fun r =>
+                                         cc_mux
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinL (FinL (FinR r)))))))
+                                           (FinL (FinR (FinR (FinR (FinL (FinL (FinR r)))))))
+                                           (cc_out [FinR Fin1]))))
+                                (cc_build
+                                   (fun r =>
+                                      cc_and
+                                        (FinL (FinL Fin1))
+                                        (FinL (FinR (FinL (FinR (FinL (FinR r))))))
+                                        (cc_and
+                                           (FinL (FinR Fin1))
+                                           (FinL (FinL (FinR (FinR (FinR (FinL (FinR r)))))))
+                                           (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                              (cc_out [FinR Fin1]))))))
+                             (cc_pair (* AAA *)
+                                (cc_pair
+                                   (cc_build
+                                      (fun a =>
+                                         cc_and
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinR (FinL (FinL a)))))))
+                                           (cc_and
+                                              (FinL (FinR Fin1))
+                                              (FinL (FinL (FinR (FinR (FinR (FinR (FinL (FinL a))))))))
+                                              (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                 (cc_out [FinR Fin1])))))
+                                   (cc_build
+                                      (fun a =>
+                                         cc_mux
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinR (FinL (FinR a)))))))
+                                           (FinL (FinR (FinR (FinR (FinR (FinL (FinR a)))))))
+                                           (cc_out [FinR Fin1]))))
+                                (cc_build
+                                   (fun a =>
+                                      cc_and
+                                        (FinL (FinL Fin1))
+                                        (FinL (FinR (FinL (FinR (FinR (FinR a))))))
+                                        (cc_and
+                                           (FinL (FinR Fin1))
+                                           (FinL (FinL (FinR (FinR (FinR (FinR (FinR a)))))))
+                                           (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                              (cc_out [FinR Fin1])))))))))
+  | a_write i arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
                        (cc_map FinL (compile_value arg))
                        (cc_pair
                           (cc_out [FinR Fin2])
                           (cc_pair (* RRR + AAA *)
                              (cc_pair (* RRR *)
                                 (cc_pair
-                                   _
-                                   _)
-                                _)
-                             (cc_pair (* AAA *)
-                                (cc_pair
-                                   _
-                                   _)
-                                _)))
-  | a_call _ arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
+                                   (cc_bool true (cc_bool false
+                                                    (cc_out (build (fun r =>
+                                                                      if Fin.eqb r (getFin i)
+                                                                      then FinL (FinR Fin1)
+                                                                      else FinR Fin1)))))
+                                   (cc_bool false (cc_out (build (fun r =>
+                                                                    if Fin.eqb r (getFin i)
+                                                                    then FinL (FinR Fin1)
+                                                                    else FinR Fin1)))))
+                                (cc_bool false
+                                   (cc_out
+                                      (build (fun r =>
+                                                if Fin.eqb r (getFin i)
+                                                then FinL (FinL (FinL (FinL (FinR (FinR r)))))
+                                                else FinR Fin1)))))
+                             (cc_bool false (cc_out (rep (FinR Fin1)))))) (* AAA *)
+  | a_call i arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
                       (cc_map FinL (compile_value arg))
                       (cc_pair
                          (cc_out [FinR Fin2])
                          (cc_pair (* RRR + AAA *)
-                            (cc_pair (* RRR *)
-                               (cc_pair
-                                  _
-                                  _)
-                               _)
+                            (cc_bool false (cc_out (rep (FinR Fin1)))) (* RRR *)
                             (cc_pair (* AAA *)
                                (cc_pair
-                                  _
-                                  _)
-                               _)))
+                                  (cc_bool true (cc_bool false
+                                                   (cc_out (build (fun a =>
+                                                                     if Fin.eqb a (getFin i)
+                                                                     then FinL (FinR Fin1)
+                                                                     else FinR Fin1)))))
+                                  (cc_bool false (cc_out (build (fun a =>
+                                                                   if Fin.eqb a (getFin i)
+                                                                   then FinL (FinR Fin1)
+                                                                   else FinR Fin1)))))
+                               (cc_bool false
+                                  (cc_out
+                                     (build (fun a =>
+                                               if Fin.eqb a (getFin i)
+                                               then FinL (FinL (FinR (FinL a)))
+                                               else FinR Fin1)))))))
   | a_abort => cc_bool true (cc_bool false (cc_out (FinL (FinR Fin1) :: rep (FinR Fin1))))
-  end.
-
-(* whether or not action a aborts based on values or self-abort
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_vsabort {sig R V A} (a : action sig R V A)
-  : comb_circuit
-      (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
-  match a with
-  | a_done => cc_bool false
-  | a_par l r => cc_or (compile_action_vsabort l) (compile_action_vsabort r)
-  | a_if c t f => cc_or (F (compile_value_abort c))
-                    (cc_mux (F (compile_value_data c))
-                       (compile_action_vsabort t) (compile_action_vsabort f))
-  | a_write _ arg => F (compile_value_abort arg)
-  | a_call _ arg => F (compile_value_abort arg)
-  | a_abort => cc_bool true
-  end.
-
-(* wire 1 = whether or not action a wants to write to pth register
-   wire 2 = data action a would write to pth register
-   wire 3 = whether or not action a aborts based on multiple writes to pth register
-   note to prove: wire 3 always implies wire 1
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_write {sig R V A} (a : action sig R V A) (p : Fin.t (length R))
-  : comb_circuit
-      (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
-  match a with
-  | a_done => (cc_bool false, cc_bool false, cc_bool false)
-  | a_par l r => match compile_action_write l p, compile_action_write r p with
-                 | (ctrl_l, data_l, abort_l), (ctrl_r, data_r, abort_r) =>
-                     (cc_or ctrl_l ctrl_r, cc_mux ctrl_l data_l data_r,
-                       cc_or (cc_and ctrl_l ctrl_r) (cc_or abort_l abort_r))
-                 end
-  | a_if c t f => match compile_action_write t p, compile_action_write f p with
-                  | (ctrl_t, data_t, abort_t), (ctrl_f, data_f, abort_f) =>
-                      (cc_or (cc_and (F (compile_value_data c)) ctrl_t)
-                         (cc_and (cc_not (F (compile_value_data c))) ctrl_f),
-                        cc_mux (F (compile_value_data c)) data_t data_f,
-                        cc_or (cc_and (F (compile_value_data c)) abort_t)
-                         (cc_and (cc_not (F (compile_value_data c))) abort_f))
-                  end
-  | a_write i arg => if Fin.eqb p (getFin i)
-                     then (cc_bool true, F (compile_value_data arg),
-                            cc_input (Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ p)))))
-                     else (cc_bool false, cc_bool false, cc_bool false)
-  | a_call _ _ => (cc_bool false, cc_bool false, cc_bool false)
-  | a_abort => (cc_bool false, cc_bool false, cc_bool false)
-  end.
-
-(* wire 1 = whether or not action a wants to call pth action method
-   wire 2 = data action a would send as argument to pth action method
-   wire 3 = whether or not action a aborts based on multiple calls to pth action method
-   note to prove: wire 3 always implies wire 1
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_call {sig R V A} (a : action sig R V A) (p : Fin.t (length A))
-  : comb_circuit
-      (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
-  match a with
-  | a_done => (cc_bool false, cc_bool false, cc_bool false)
-  | a_par l r => match compile_action_call l p, compile_action_call r p with
-                 | (ctrl_l, data_l, abort_l), (ctrl_r, data_r, abort_r) =>
-                     (cc_or ctrl_l ctrl_r, cc_mux ctrl_l data_l data_r,
-                       cc_or (cc_and ctrl_l ctrl_r) (cc_or abort_l abort_r))
-                 end
-  | a_if c t f => match compile_action_call t p, compile_action_call f p with
-                  | (ctrl_t, data_t, abort_t), (ctrl_f, data_f, abort_f) =>
-                      (cc_or (cc_and (F (compile_value_data c)) ctrl_t)
-                         (cc_and (cc_not (F (compile_value_data c))) ctrl_f),
-                        cc_mux (F (compile_value_data c)) data_t data_f,
-                        cc_or (cc_and (F (compile_value_data c)) abort_t)
-                         (cc_and (cc_not (F (compile_value_data c))) abort_f))
-                  end
-  | a_write _ _ => (cc_bool false, cc_bool false, cc_bool false)
-  | a_call i arg => if Fin.eqb p (getFin i)
-                    then (cc_bool true, F (compile_value_data arg),
-                           cc_input (Fin.R _ (Fin.L _ p)))
-                    else (cc_bool false, cc_bool false, cc_bool false)
-  | a_abort => (cc_bool false, cc_bool false, cc_bool false)
   end.
 
 (* whether or not action a aborts based on values, self-abort, multiple writes to the same
