@@ -9,6 +9,229 @@ Inductive InT {A} (a : A) : list A -> Type :=
 | InT_eq {l} : InT a (cons a l)
 | InT_cons {b l} (i : InT a l) : InT a (cons b l).
 
+Context {var_T mod_name_T met_name_T : Type}.
+Context {read write : met_name_T}.
+Context {read0 read1 write0 write1 : met_name_T}.
+
+(* LANGUAGE SYNTAX *)
+
+(* TODO *)
+Inductive const : nat -> Type :=
+| k_nil : const 0
+| k_bool : const 1.
+
+(* TODO *)
+Inductive func (sz sz' : nat) : Type.
+
+Inductive value (Sig : list (var_T * nat))
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
+  : nat -> Type :=
+| v_const {sz} (k : const sz)
+  : value Sig M sz
+| v_func {sz sz'} (f : func sz sz') (arg : value Sig M sz)
+  : value Sig M sz'
+| v_if {sz} (c : value Sig M 1) (t f : value Sig M sz)
+  : value Sig M sz
+| v_var {x sz} (i : InT x Sig)
+  : value Sig M sz
+| v_let {x sz sz'} (expr : value Sig M sz) (body : value (cons (x, sz) Sig) M sz')
+  : value Sig M sz
+| v_call {m l n sz sz'} (i : InT (m, l) M) (i' : InT (inl (n, sz, sz')) l) (arg : value Sig M sz)
+  : value Sig M sz'
+| v_abort {sz}
+  : value Sig M sz.
+Arguments v_const {Sig M sz}.
+Arguments v_func {Sig M sz sz'}.
+Arguments v_if {Sig M sz}.
+Arguments v_var {Sig M x sz}.
+Arguments v_let {Sig M x sz sz'}.
+Arguments v_call {Sig M m l n sz sz'}.
+Arguments v_abort {Sig M sz}.
+
+Inductive action (Sig : list (var_T * nat))
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
+  : Type :=
+| a_done
+| a_par (l r : action Sig M)
+| a_if (c : value Sig M 1) (t f : action Sig M)
+| a_let {x sz} (expr : value Sig M sz) (body : action (cons (x, sz) Sig) M)
+| a_call {m l n sz} (i : InT (m, l) M) (i' : InT (inr (n, sz)) l) (arg : value Sig M sz)
+| a_abort.
+Arguments a_done {Sig M}.
+Arguments a_par {Sig M}.
+Arguments a_if {Sig M}.
+Arguments a_let {Sig M}.
+Arguments a_call {Sig M m l n sz}.
+Arguments a_abort {Sig M}.
+
+Record value_method M : Type :=
+  mkvm {
+      name_vm : met_name_T;
+      arg_vm : var_T * nat;
+      sz_vm : nat;
+      body_vm : value (cons arg_vm nil) M sz_vm;
+    }.
+Arguments name_vm {M}.
+Arguments arg_vm {M}.
+Arguments sz_vm {M}.
+Arguments body_vm {M}.
+
+Definition rule M : Type := action nil M.
+
+Record action_method M : Type :=
+  mkam {
+      name_am : met_name_T;
+      arg_am : var_T * nat;
+      body_am : action (cons arg_am nil) M;
+    }.
+Arguments name_am {M}.
+Arguments arg_am {M}.
+Arguments body_am {M}.
+
+Definition interface_reg sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+  cons (inl (read, 0, sz)) (cons (inr (write, sz)) nil).
+
+Definition interface_ehr sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+  cons (inl (read0, 0, sz)) (cons (inr (write0, sz))
+                               (cons (inl (read1, 0, sz)) (cons (inr (write1, sz)) nil))).
+
+Fixpoint interface_top {M} (schedule : list (value_method M + rule M + action_method M))
+  : list (met_name_T * nat * nat + met_name_T * nat) :=
+  match schedule with
+  | nil => nil
+  | cons (inl (inl vm)) schedule' =>
+      cons (inl (name_vm vm, snd (arg_vm vm), sz_vm vm)) (interface_top schedule')
+  | cons (inl (inr _)) schedule' => interface_top schedule'
+  | cons (inr am) schedule' =>
+      cons (inr (name_am am, snd (arg_am am))) (interface_top schedule')
+  end.
+
+Inductive module' : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)) ->
+                    list (met_name_T * nat * nat + met_name_T * nat) -> Type :=
+| mod_reg (sz : nat)
+  : module' nil (interface_reg sz)
+| mod_ehr (sz : nat)
+  : module' nil (interface_ehr sz)
+| mod_top {M} (schedule : list (value_method M + rule M + action_method M))
+  : module' M (interface_top schedule)
+| mod_sub {M l l'} (m : mod_name_T) (sub : module' nil l) (m' : module' (cons (m, l) M) l')
+  : module' M l'.
+Arguments mod_top {M}.
+Arguments mod_sub {M l l'}.
+Definition module := module' nil.
+
+(* CIRCUIT SYNTAX *)
+
+Inductive comb_circuit (I O : nat) : Type :=
+| cc_out (o : Vector.t (Fin.t I) O)
+| cc_bool (b : bool) (tl : comb_circuit (I + 1) O)
+| cc_not (i : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_and (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_or (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_mux (sel tru fal : Fin.t I) (tl : comb_circuit (I + 1) O).
+Arguments cc_out {I O}.
+Arguments cc_bool {I O}.
+Arguments cc_not {I O}.
+Arguments cc_and {I O}.
+Arguments cc_or {I O}.
+Arguments cc_mux {I O}.
+
+Fixpoint input (mets : list (nat * nat + nat)) : nat :=
+  match mets with
+  | nil => 0
+  | cons (inl (sz, _)) mets' => sz + input mets'
+  | cons (inr sz) mets' => (1 + sz + 1) + input mets'
+  end.
+
+Fixpoint output (mets : list (nat * nat + nat)) : nat :=
+  match mets with
+  | nil => 0
+  | cons (inl (_, sz)) mets' => (sz + 1) + output mets'
+  | cons (inr _) mets' => 1 + output mets'
+  end.
+
+Record seq_circuit (mets : list (nat * nat + nat)) : Type :=
+  mksc {
+      regs_sc : nat;
+      cc_sc : comb_circuit (input mets + regs_sc) (regs_sc + output mets);
+    }.
+Arguments mksc {mets}.
+Arguments regs_sc {mets}.
+Arguments cc_sc {mets}.
+
+(* CIRCUIT DEFINITIONS *)
+
+Definition cc_empty : comb_circuit 0 0 :=
+  cc_out (Vector.nil _).
+
+Definition sc_empty : seq_circuit nil :=
+  @mksc nil 0 cc_empty.
+
+Definition sc_pair {mets1 mets2} (sc1 : seq_circuit mets1) (sc2 : seq_circuit mets2)
+  : seq_circuit (mets1 ++ mets2).
+Admitted.
+
+(* COMPILE MODULE *)
+
+Fixpoint anonymize (l : list (met_name_T * nat * nat + met_name_T * nat))
+  : list (nat * nat + nat) :=
+  match l with
+  | nil => nil
+  | cons (inl (_, sz, sz')) l' => cons (inl (sz, sz')) (anonymize l')
+  | cons (inr (_, sz)) l' => cons (inr sz) (anonymize l')
+  end.
+
+Definition anonymize_all
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
+  : list (nat * nat + nat) :=
+  flat_map (fun ml => anonymize (snd ml)) M.
+
+Definition cc_reg sz : comb_circuit (input (anonymize (interface_reg sz)) + sz)
+                         (sz + output (anonymize (interface_reg sz))).
+Admitted.
+
+Definition cc_ehr sz : comb_circuit (input (anonymize (interface_ehr sz)) + sz)
+                         (sz + output (anonymize (interface_ehr sz))).
+Admitted.
+
+Fixpoint compile' {M l} (subs : seq_circuit (anonymize_all M))
+  (m' : module' M l) : seq_circuit (anonymize l) :=
+  match m' in module' M l return seq_circuit (anonymize_all M) -> seq_circuit (anonymize l) with
+  | mod_reg sz => fun _ => mksc sz (cc_reg sz)
+  | mod_ehr sz => fun _ => mksc sz (cc_ehr sz)
+  | mod_top schedule => fun subs => mksc _ _
+  | @mod_sub M l l' m sub m' =>
+      fun subs => compile' (sc_pair (@compile' nil _ sc_empty sub) subs) m'
+  end subs.
+
+  | mk_mod R vms rules ams =>
+      cast eq_refl (eq_sym (map_length _ _))
+        (mksc _ _ (length R + regs _ _ children)
+           (Vector.cast (Vector.of_list
+                           (map (fun vm => cc_connect (connect_value_method' children)
+                                             (compile_value_method_data vm)) vms))
+              (eq_trans (map_length _ _) (eq_sym (map_length _ _))))
+           (Vector.cast (Vector.of_list
+                           (map (fun vm => cc_connect (connect_value_method' children)
+                                             (compile_value_method_abort vm)) vms))
+              (eq_trans (map_length _ _) (eq_sym (map_length _ _))))
+           (compile_schedule children (build_schedule rules ams)))
+  | @child_mod _ _ vi' ai' _ _ M child m' =>
+      @compile' (map (pair M) vi' ++ V) (map (pair M) ai' ++ A) _ _
+        (cast
+           (eq_trans (f_equal2 _ (eq_sym (map_length _ _)) eq_refl) (eq_sym (app_length _ _)))
+           (eq_trans (f_equal2 _ (eq_sym (map_length _ _)) eq_refl) (eq_sym (app_length _ _)))
+           (group (@compile' [] [] vi' ai' empty child) children)) m'
+  end.
+
+(* compile module *)
+Definition compile {vi ai} (m : module vi ai) : seq_circuit (length vi) (length ai) :=
+  @compile' [] [] vi ai empty m.
+
+
+
+
+
 (* Fin.t index of element InT *)
 Fixpoint getFin {A a l} (i : @InT A a l) : Fin.t (length l) :=
   match i with
@@ -48,17 +271,9 @@ Notation FinR := (Fin.R _).
 Notation Fin1 := Fin.F1.
 Notation Fin2 := (Fin.FS Fin.F1).
 
-(* TODO:
-   - type system with complex types
-       (currently each value is only two wires: a data bit and an abort bit)
-   - let-expr in value
-   - let-expr in action
-   - let-expr in comb_circuit (to be used instead of copying circuits all over the place)
-   - arbitrary functions in value
-   - read/write ports
-   - inputs to value methods
-       (including the need for a mechanism to ensure that each value method is called only once)
-   - multiple inputs to action methods
+
+
+(* DOING:
    - mechanism preventing value method calls from violating ORAAT semantics
        (currently value method calls do not consider previously completed actions)
    - mechanism preventing aborting action method calls from violating ORAAT semantics
@@ -66,11 +281,11 @@ Notation Fin2 := (Fin.FS Fin.F1).
         appropariately abort an entire rule or action method)
    - allow for arbitrary interleaving of value methods, rules, and action methods
        (currently they are always scheduled in the order listed above)
+   - special compilation for value methods with no arguments
+   - primitive modules for registers, phemeral history registers
 *)
 
-Section Lang.
 
-Context {reg_T mod_name_T met_name_T var_T : Type}.
 
 (* COMBINATIONAL CIRCUIT *)
 
@@ -181,27 +396,7 @@ Fixpoint cc_build {n I} (f : Fin.t n -> comb_circuit I 1) : comb_circuit I n :=
 
 (* VALUE *)
 
-(* a language value *)
-Inductive value (sig : list var_T) (R : list reg_T) (V : list (mod_name_T * met_name_T))
-  : Type :=
-| v_bool (b : bool)
-| v_not (v : value sig R V)
-| v_and (v1 v2 : value sig R V)
-| v_or (v1 v2 : value sig R V)
-| v_if (c t f : value sig R V)
-| v_var {x : var_T} (i : InT x sig)
-| v_read {r : reg_T} (i : InT r R)
-| v_call {M : mod_name_T} {m : met_name_T} (i : InT (M, m) V)
-| v_abort.
-Arguments v_bool {sig R V}.
-Arguments v_not {sig R V}.
-Arguments v_and {sig R V}.
-Arguments v_or {sig R V}.
-Arguments v_if {sig R V}.
-Arguments v_var {sig R V x}.
-Arguments v_read {sig R V r}.
-Arguments v_call {sig R V M m}.
-Arguments v_abort {sig R V}.
+
 
 (* circuit inputs:
    - length sig = action method input data wires
@@ -243,21 +438,7 @@ Fixpoint compile_value {sig R V} (v : value sig R V)
 
 (* ACTION *)
 
-(* a language action *)
-Inductive action (sig : list var_T) (R : list reg_T) (V A : list (mod_name_T * met_name_T))
-  : Type :=
-| a_done
-| a_par (l r : action sig R V A)
-| a_if (c : value sig R V) (t f : action sig R V A)
-| a_write {r : reg_T} (i : InT r R) (arg : value sig R V)
-| a_call {M : mod_name_T} {m : met_name_T} (i : InT (M, m) A) (arg : value sig R V)
-| a_abort.
-Arguments a_done {sig R V A}.
-Arguments a_par {sig R V A}.
-Arguments a_if {sig R V A}.
-Arguments a_write {sig R V A r}.
-Arguments a_call {sig R V A M m}.
-Arguments a_abort {sig R V A}.
+
 
 (* circuit inputs:
    - length sig = action method input data wires
@@ -527,14 +708,7 @@ Definition compile_action_abort {sig R V A} (a : action sig R V A)
 
 (* VALUE METHOD *)
 
-(* a language value method *)
-Record value_method R V : Type :=
-  mkvm {
-      name_vm : met_name_T;
-      body_vm : value [] R V;
-    }.
-Arguments name_vm {R V}.
-Arguments body_vm {R V}.
+
 
 (* function to be used with cc_connect
    old circuit inputs:
@@ -735,11 +909,11 @@ Definition compile_rule {acts R V A} (r : rule R V A)
 Record action_method R V A : Type :=
   mkam {
     name_am : met_name_T;
-    arg_am : var_T;
-    body_am : action [arg_am] R V A;
+    args_am : var_T;
+    body_am : action args_am R V A;
     }.
 Arguments name_am {R V A}.
-Arguments arg_am {R V A}.
+Arguments args_am {R V A}.
 Arguments body_am {R V A}.
 
 (* adds action method to beginning of schedule *)
@@ -822,17 +996,24 @@ Definition group {v1 v2 a1 a2} (c1 : seq_circuit v1 a1) (c2 : seq_circuit v2 a2)
 
 (* MODULE *)
 
-(* a language module using children value methods V and children action methods A *)
-Inductive module' V A : list met_name_T -> list met_name_T -> Type :=
-| mk_mod (R : list reg_T) (vms : list (value_method R V)) (rules : list (rule R V A))
-    (ams : list (action_method R V A))
-  : module' V A (map name_vm vms) (map name_am ams)
-| child_mod {vi ai vi' ai'} (M : mod_name_T) (mod : module' [] [] vi ai)
-    (m' : module' (map (pair M) vi ++ V) (map (pair M) ai ++ A) vi' ai')
-  : module' V A vi' ai'.
-Arguments mk_mod {V A}.
-Arguments child_mod {V A vi ai vi' ai'}.
-Definition module := module' [] [].
+Fixpoint l_of_L R M (L : list (value_method R M + rule R M + action_method R M))
+  : list (vm_name_T + am_name_T) :=
+  match L with
+  | nil => nil
+  | inl (inl vm) :: L' => inl (name_vm vm) :: (l_of_L L')
+  | inl (inr _) :: L' => l_of_L L'
+  | inr am :: L' => inr (name_am am) :: (l_of_L L')
+  end.
+
+(* a language module using children M *)
+Inductive module' M : list (vm_name_T + am_name_T) -> Type :=
+| mk_mod (R : list reg_T) (L : list (value_method R M + rule R M + action_method R M))
+  : module' M (l_of_L L)
+| child_mod {l l'} (m : mod_name_T) (child : module' [] l) (m' : module' ((m, l) :: M) l')
+  : module' M l'.
+Arguments mk_mod {M}.
+Arguments child_mod {M l l'}.
+Definition module := module' [].
 
 (* adds list of action methods to schedule *)
 Fixpoint compile_action_methods {R V A} (ams : list (action_method R V A))
