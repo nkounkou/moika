@@ -194,39 +194,23 @@ Definition cc_ehr sz : comb_circuit (input (anonymize (interface_ehr sz)) + sz)
                          (sz + output (anonymize (interface_ehr sz))).
 Admitted.
 
-Fixpoint compile' {M l} (subs : seq_circuit (anonymize_all M))
-  (m' : module' M l) : seq_circuit (anonymize l) :=
+Definition cc_top {M} (subs : seq_circuit (anonymize_all M))
+  (schedule : list (value_method M + rule M + action_method M))
+  : comb_circuit (input (anonymize (interface_top schedule)) + regs_sc subs)
+      (regs_sc subs + output (anonymize (interface_top schedule))).
+Admitted.
+
+Fixpoint compile' M (subs : seq_circuit (anonymize_all M)) {l} (m' : module' M l)
+  : seq_circuit (anonymize l) :=
   match m' in module' M l return seq_circuit (anonymize_all M) -> seq_circuit (anonymize l) with
   | mod_reg sz => fun _ => mksc sz (cc_reg sz)
   | mod_ehr sz => fun _ => mksc sz (cc_ehr sz)
-  | mod_top schedule => fun subs => mksc _ _
-  | @mod_sub M l l' m sub m' =>
-      fun subs => compile' (sc_pair (@compile' nil _ sc_empty sub) subs) m'
+  | mod_top schedule => fun subs => mksc (regs_sc subs) (cc_top subs schedule)
+  | mod_sub m sub m' =>
+      fun subs => compile' (cons (m, _) _) (sc_pair (compile' nil sc_empty sub) subs) m'
   end subs.
-
-  | mk_mod R vms rules ams =>
-      cast eq_refl (eq_sym (map_length _ _))
-        (mksc _ _ (length R + regs _ _ children)
-           (Vector.cast (Vector.of_list
-                           (map (fun vm => cc_connect (connect_value_method' children)
-                                             (compile_value_method_data vm)) vms))
-              (eq_trans (map_length _ _) (eq_sym (map_length _ _))))
-           (Vector.cast (Vector.of_list
-                           (map (fun vm => cc_connect (connect_value_method' children)
-                                             (compile_value_method_abort vm)) vms))
-              (eq_trans (map_length _ _) (eq_sym (map_length _ _))))
-           (compile_schedule children (build_schedule rules ams)))
-  | @child_mod _ _ vi' ai' _ _ M child m' =>
-      @compile' (map (pair M) vi' ++ V) (map (pair M) ai' ++ A) _ _
-        (cast
-           (eq_trans (f_equal2 _ (eq_sym (map_length _ _)) eq_refl) (eq_sym (app_length _ _)))
-           (eq_trans (f_equal2 _ (eq_sym (map_length _ _)) eq_refl) (eq_sym (app_length _ _)))
-           (group (@compile' [] [] vi' ai' empty child) children)) m'
-  end.
-
-(* compile module *)
-Definition compile {vi ai} (m : module vi ai) : seq_circuit (length vi) (length ai) :=
-  @compile' [] [] vi ai empty m.
+Definition compile {l} (m : module l) : seq_circuit (anonymize l) :=
+  compile' nil sc_empty m.
 
 
 
