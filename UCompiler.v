@@ -9,6 +9,9 @@ Inductive InT {A} (a : A) : list A -> Type :=
 | InT_eq {l} : InT a (cons a l)
 | InT_cons {b l} (i : InT a l) : InT a (cons b l).
 
+Definition seq_all n : Vector.t (Fin.t n) n.
+  Admitted.
+
 Context {var_T mod_name_T met_name_T : Type}.
 Context {read write : met_name_T}.
 Context {read0 read1 write0 write1 : met_name_T}.
@@ -161,8 +164,20 @@ Arguments cc_sc {mets}.
 
 (* CIRCUIT DEFINITIONS *)
 
-Definition cc_empty : comb_circuit 0 0 :=
-  cc_out (Vector.nil _).
+Definition cc_empty : comb_circuit 0 0 := cc_out [].
+
+Definition cc_false {I} : comb_circuit I 1 := cc_bool false (cc_out [Fin.R _ Fin.F1]).
+
+Definition cc_if {I O} (s : comb_circuit I 1) (t f : comb_circuit I O) : comb_circuit I O.
+Admitted.
+
+Definition cc_pairO {I O1 O2} (cc1 : comb_circuit I O1) (cc2 : comb_circuit I O2)
+  : comb_circuit I (O1 + O2).
+Admitted.
+
+Definition cc_let {I X O} (expr : comb_circuit I X) (body : comb_circuit (I + X) O)
+  : comb_circuit I O.
+Admitted.
 
 Definition sc_empty : seq_circuit nil :=
   @mksc nil 0 cc_empty.
@@ -186,13 +201,57 @@ Definition anonymize_all
   : list (nat * nat + nat) :=
   flat_map (fun ml => anonymize (snd ml)) M.
 
+(* comb_circuit ((1 + sz + 1 + 0) + sz) (sz + ((sz + 1) + 1))
+   inputs:
+   - 1 + sz + 1 = enable write (ignored) + write value + commit write
+   - sz = current value
+   outputs:
+   - sz = commit value
+   - sz + 1 = read value + read abort (always false)
+   - 1 = write abort (always false) *)
+Definition cc_reg'writeval {sz} : comb_circuit ((1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.L _ (Fin.L _ (Fin.R _ p)))) (seq_all sz)).
+Definition cc_reg'commit {sz} : comb_circuit ((1 + sz + 1 + 0) + sz) 1 :=
+  cc_out [Fin.L _ (Fin.L _ (Fin.R _ Fin.F1))].
+Definition cc_reg'currval {sz} : comb_circuit ((1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (Fin.R _) (seq_all sz)).
 Definition cc_reg sz : comb_circuit (input (anonymize (interface_reg sz)) + sz)
-                         (sz + output (anonymize (interface_reg sz))).
-Admitted.
+                         (sz + output (anonymize (interface_reg sz))) :=
+  cc_pairO (cc_if cc_reg'commit cc_reg'writeval cc_reg'currval)
+    (cc_pairO (cc_pairO cc_reg'currval cc_false) cc_false).
 
+(* comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz) (sz + ((sz + 1) + (1 + ((sz + 1) + 1))))
+   inputs:
+   - 1 + sz + 1 = enable write0 (ignored) + write0 value + commit write0
+   - 1 + sz + 1 = enable write1 (ignored) + write1 value + commit write1
+   - sz = current value
+   outputs:
+   - sz = commit value
+   - sz + 1 = read0 value + read0 abort (always false)
+   - 1 = write0 abort (always false)
+   - sz + 1 = read1 value + read1 abort (always false)
+   - 1 = write1 abort (always false) *)
+Definition cc_ehr'write0val {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.L _ (Fin.L _ (Fin.R _ p)))) (seq_all sz)).
+Definition cc_ehr'commit0 {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz) 1 :=
+  cc_out [Fin.L _ (Fin.L _ (Fin.R _ Fin.F1))].
+Definition cc_ehr'write1val' {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.L _ (Fin.R _ (Fin.L _ (Fin.L _ (Fin.R _ p)))))) (seq_all sz)).
+Definition cc_ehr'commit1' {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz + sz) 1 :=
+  cc_out [Fin.L _ (Fin.L _ (Fin.R _ (Fin.L _ (Fin.R _ Fin.F1))))].
+Definition cc_ehr'currval {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (Fin.R _) (seq_all sz)).
+Definition cc_ehr'currval' {sz} : comb_circuit ((1 + sz + 1) + (1 + sz + 1 + 0) + sz + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.R _ p)) (seq_all sz)).
 Definition cc_ehr sz : comb_circuit (input (anonymize (interface_ehr sz)) + sz)
-                         (sz + output (anonymize (interface_ehr sz))).
-Admitted.
+                         (sz + output (anonymize (interface_ehr sz))) :=
+  cc_let (cc_if cc_ehr'commit0 cc_ehr'write0val cc_ehr'currval)
+    (cc_pairO (cc_if cc_ehr'commit1' cc_ehr'write1val'
+                 (cc_out (Vector.map (Fin.R _) (seq_all sz))))
+       (cc_pairO (cc_pairO cc_ehr'currval' cc_false)
+          (cc_pairO cc_false (cc_pairO (cc_pairO (cc_out (Vector.map (Fin.R _) (seq_all sz)))
+                                          cc_false)
+                                cc_false)))).
 
 Definition cc_top {M} (subs : seq_circuit (anonymize_all M))
   (schedule : list (value_method M + rule M + action_method M))
@@ -272,21 +331,6 @@ Notation Fin2 := (Fin.FS Fin.F1).
 
 
 (* COMBINATIONAL CIRCUIT *)
-
-(* a combinational circuit with I input wires and O output wires *)
-Inductive comb_circuit (I O : nat) : Type :=
-| cc_out (o : Vector.t (Fin.t I) O)
-| cc_bool (b : bool) (tl : comb_circuit (I + 1) O)
-| cc_not (i : Fin.t I) (tl : comb_circuit (I + 1) O)
-| cc_and (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
-| cc_or (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
-| cc_mux (sel tru fal : Fin.t I) (tl : comb_circuit (I + 1) O).
-Arguments cc_out {I O}.
-Arguments cc_bool {I O}.
-Arguments cc_not {I O}.
-Arguments cc_and {I O}.
-Arguments cc_or {I O}.
-Arguments cc_mux {I O}.
 
 (* TODOC *)
 Definition fmap1 {I I'} (f : Fin.t I -> Fin.t I') : Fin.t (I + 1) -> Fin.t (I' + 1) :=
