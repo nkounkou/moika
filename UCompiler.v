@@ -5,12 +5,18 @@ Import Vector.VectorNotations.
 (* HELPER FUNCTIONS *)
 
 (* List.In as a Type (not Prop) *)
-Inductive InT {A} (a : A) : list A -> Type :=
+Inductive InT {A : Type} (a : A) : list A -> Type :=
 | InT_eq {l} : InT a (cons a l)
 | InT_cons {b l} (i : InT a l) : InT a (cons b l).
 
-Definition seq_all n : Vector.t (Fin.t n) n.
-  Admitted.
+(* TODO: make more efficient *)
+Fixpoint seq_all (n : nat) : Vector.t (Fin.t n) n :=
+  match n with
+  | 0 => []
+  | S n' => Fin.F1 :: Vector.map Fin.FS (seq_all n')
+  end.
+
+(* CONTEXT *)
 
 Context {var_T mod_name_T met_name_T : Type}.
 Context {read write : met_name_T}.
@@ -18,24 +24,22 @@ Context {read0 read1 write0 write1 : met_name_T}.
 
 (* LANGUAGE SYNTAX *)
 
-(* TODO *)
-Inductive const : nat -> Type :=
-| k_nil : const 0
-| k_bool : const 1.
-
-(* TODO *)
-Inductive func (sz sz' : nat) : Type.
+Inductive boolop (sz : nat) : Type :=
+| bo_bool (b : bool)
+| bo_input (i : Fin.t sz)
+| bo_not (bo : boolop sz)
+| bo_and (bo1 bo2 : boolop sz)
+| bo_or (bo1 bo2 : boolop sz).
 
 Inductive value (Sig : list (var_T * nat))
-  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
-  : nat -> Type :=
-| v_const {sz} (k : const sz)
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat))) : nat -> Type :=
+| v_const {sz} (bs : Vector.t bool sz)
   : value Sig M sz
-| v_func {sz sz'} (f : func sz sz') (arg : value Sig M sz)
+| v_func {sz sz'} (bos : Vector.t (boolop sz) sz') (arg : value Sig M sz)
   : value Sig M sz'
 | v_if {sz} (c : value Sig M 1) (t f : value Sig M sz)
   : value Sig M sz
-| v_var {x sz} (i : InT x Sig)
+| v_var {x sz} (i : InT (x, sz) Sig)
   : value Sig M sz
 | v_let {x sz sz'} (expr : value Sig M sz) (body : value (cons (x, sz) Sig) M sz')
   : value Sig M sz
@@ -91,36 +95,39 @@ Arguments name_am {M}.
 Arguments arg_am {M}.
 Arguments body_am {M}.
 
-Definition interface_reg sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+(* named method interface of a regular register *)
+Definition nmets_reg sz : list (met_name_T * nat * nat + met_name_T * nat) :=
   cons (inl (read, 0, sz)) (cons (inr (write, sz)) nil).
 
-Definition interface_ehr sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+(* named method interface of an ephemeral history register *)
+Definition nmets_ehr sz : list (met_name_T * nat * nat + met_name_T * nat) :=
   cons (inl (read0, 0, sz)) (cons (inr (write0, sz))
                                (cons (inl (read1, 0, sz)) (cons (inr (write1, sz)) nil))).
 
-Fixpoint interface_top {M} (schedule : list (value_method M + rule M + action_method M))
+(* named method interface of a top-level module's schedule *)
+Fixpoint nmets_top {M} (schedule : list (value_method M + rule M + action_method M))
   : list (met_name_T * nat * nat + met_name_T * nat) :=
   match schedule with
   | nil => nil
   | cons (inl (inl vm)) schedule' =>
-      cons (inl (name_vm vm, snd (arg_vm vm), sz_vm vm)) (interface_top schedule')
-  | cons (inl (inr _)) schedule' => interface_top schedule'
-  | cons (inr am) schedule' =>
-      cons (inr (name_am am, snd (arg_am am))) (interface_top schedule')
+      cons (inl (name_vm vm, snd (arg_vm vm), sz_vm vm)) (nmets_top schedule')
+  | cons (inl (inr _)) schedule' => nmets_top schedule'
+  | cons (inr am) schedule' => cons (inr (name_am am, snd (arg_am am))) (nmets_top schedule')
   end.
 
 Inductive module' : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)) ->
                     list (met_name_T * nat * nat + met_name_T * nat) -> Type :=
 | mod_reg (sz : nat)
-  : module' nil (interface_reg sz)
+  : module' nil (nmets_reg sz)
 | mod_ehr (sz : nat)
-  : module' nil (interface_ehr sz)
+  : module' nil (nmets_ehr sz)
 | mod_top {M} (schedule : list (value_method M + rule M + action_method M))
-  : module' M (interface_top schedule)
-| mod_sub {M l l'} (m : mod_name_T) (sub : module' nil l) (m' : module' (cons (m, l) M) l')
-  : module' M l'.
+  : module' M (nmets_top schedule)
+| mod_sub {M nmets nmets'} (m : mod_name_T) (sub : module' nil nmets)
+    (m' : module' (cons (m, nmets) M) nmets')
+  : module' M nmets'.
 Arguments mod_top {M}.
-Arguments mod_sub {M l l'}.
+Arguments mod_sub {M nmets nmets'}.
 Definition module := module' nil.
 
 (* CIRCUIT SYNTAX *)
@@ -139,20 +146,23 @@ Arguments cc_and {I O}.
 Arguments cc_or {I O}.
 Arguments cc_mux {I O}.
 
+(* compute the number of circuit inputs corresponding to unnamed method interface *)
 Fixpoint input (mets : list (nat * nat + nat)) : nat :=
   match mets with
   | nil => 0
-  | cons (inl (sz, _)) mets' => (1 + sz) + input mets'
-  | cons (inr sz) mets' => (1 + sz + 1) + input mets'
+  | cons (inl (sz, _)) mets' => (1 + sz) + input mets' (* value method enable + input *)
+  | cons (inr sz) mets' => (1 + sz + 1) + input mets' (* action method enable + input + commit *)
   end.
 
+(* compute the number of circuit outputs corresponding to unnamed method interface *)
 Fixpoint output (mets : list (nat * nat + nat)) : nat :=
   match mets with
   | nil => 0
-  | cons (inl (_, sz)) mets' => (sz + 1) + output mets'
-  | cons (inr _) mets' => 1 + output mets'
+  | cons (inl (_, sz)) mets' => (sz + 1) + output mets' (* value method output + abort *)
+  | cons (inr _) mets' => 1 + output mets' (* action method abort *)
   end.
 
+(* sequential circuit with unnamed method interface *)
 Record seq_circuit (mets : list (nat * nat + nat)) : Type :=
   mksc {
       regs_sc : nat;
@@ -188,6 +198,7 @@ Admitted.
 
 (* COMPILE MODULE *)
 
+(* remove names from method interface *)
 Fixpoint anonymize (l : list (met_name_T * nat * nat + met_name_T * nat))
   : list (nat * nat + nat) :=
   match l with
@@ -195,13 +206,13 @@ Fixpoint anonymize (l : list (met_name_T * nat * nat + met_name_T * nat))
   | cons (inl (_, sz, sz')) l' => cons (inl (sz, sz')) (anonymize l')
   | cons (inr (_, sz)) l' => cons (inr sz) (anonymize l')
   end.
-
 Definition anonymize_all
   (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
   : list (nat * nat + nat) :=
   flat_map (fun ml => anonymize (snd ml)) M.
 
-(* comb_circuit (1 + (1 + sz + 1 + 0) + sz) (sz + ((sz + 1) + 1))
+(* build the combinational circuit for a regular register
+   comb_circuit (1 + (1 + sz + 1 + 0) + sz) (sz + ((sz + 1) + 1))
    inputs:
    - 1 = enable read (ignored)
    - 1 + sz + 1 = enable write (ignored) + write value + commit write
@@ -216,12 +227,13 @@ Definition cc_reg'commit {sz} : comb_circuit (1 + (1 + sz + 1 + 0) + sz) 1 :=
   cc_out [Fin.L _ (Fin.R _ (Fin.L _ (Fin.R _ Fin.F1)))].
 Definition cc_reg'currval {sz} : comb_circuit (1 + (1 + sz + 1 + 0) + sz) sz :=
   cc_out (Vector.map (Fin.R _) (seq_all sz)).
-Definition cc_reg sz : comb_circuit (input (anonymize (interface_reg sz)) + sz)
-                         (sz + output (anonymize (interface_reg sz))) :=
+Definition cc_reg sz : comb_circuit (input (anonymize (nmets_reg sz)) + sz)
+                         (sz + output (anonymize (nmets_reg sz))) :=
   cc_pairO (cc_if cc_reg'commit cc_reg'writeval cc_reg'currval)
     (cc_pairO (cc_pairO cc_reg'currval cc_false) cc_false).
 
-(* comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz)
+(* build the combinational circuit for an ephemeral history register
+   comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz)
                 (sz + ((sz + 1) + (1 + ((sz + 1) + 1))))
    inputs:
    - 1 = enable read0 (ignored)
@@ -256,8 +268,8 @@ Definition cc_ehr'currval {sz}
 Definition cc_ehr'currvalX {sz X}
   : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz + X) sz :=
   cc_out (Vector.map (fun p => Fin.L _ (Fin.R _ p)) (seq_all sz)).
-Definition cc_ehr sz : comb_circuit (input (anonymize (interface_ehr sz)) + sz)
-                         (sz + output (anonymize (interface_ehr sz))) :=
+Definition cc_ehr sz : comb_circuit (input (anonymize (nmets_ehr sz)) + sz)
+                         (sz + output (anonymize (nmets_ehr sz))) :=
   cc_let (cc_if cc_ehr'commit0 cc_ehr'write0val cc_ehr'currval)
     (cc_pairO
        (cc_if cc_ehr'commit1X cc_ehr'write1valX (cc_out (Vector.map (Fin.R _) (seq_all sz))))
@@ -266,14 +278,15 @@ Definition cc_ehr sz : comb_circuit (input (anonymize (interface_ehr sz)) + sz)
              (cc_pairO (cc_pairO (cc_out (Vector.map (Fin.R _) (seq_all sz))) cc_false)
                 cc_false)))).
 
+(* build the combinational circuit for a top-level module's schedule *)
 Definition cc_top' {M} (schedule : list (value_method M + rule M + action_method M))
-  : comb_circuit (input (anonymize (interface_top schedule)) + output (anonymize_all M))
-      (input (anonymize_all M) + output (anonymize (interface_top schedule))).
+  : comb_circuit (input (anonymize (nmets_top schedule)) + output (anonymize_all M))
+      (input (anonymize_all M) + output (anonymize (nmets_top schedule))).
 Admitted.
 Definition cc_top {M} (subs : seq_circuit (anonymize_all M))
   (schedule : list (value_method M + rule M + action_method M))
-  : comb_circuit (input (anonymize (interface_top schedule)) + regs_sc subs)
-      (regs_sc subs + output (anonymize (interface_top schedule))).
+  : comb_circuit (input (anonymize (nmets_top schedule)) + regs_sc subs)
+      (regs_sc subs + output (anonymize (nmets_top schedule))).
 Admitted.
 
 Fixpoint compile' M (subs : seq_circuit (anonymize_all M)) {l} (m' : module' M l)
