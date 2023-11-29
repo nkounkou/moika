@@ -1,13 +1,309 @@
 Require Vector.
 Require Import List.
-Import ListNotations.
+Import Vector.VectorNotations.
 
 (* HELPER FUNCTIONS *)
 
 (* List.In as a Type (not Prop) *)
-Inductive InT {A} (a : A) : list A -> Type :=
-| InT_eq {l} : InT a (a :: l)
-| InT_cons {b l} (i : InT a l) : InT a (b :: l).
+Inductive InT {A : Type} (a : A) : list A -> Type :=
+| InT_eq {l} : InT a (cons a l)
+| InT_cons {b l} (i : InT a l) : InT a (cons b l).
+
+(* TODO: make more efficient *)
+Fixpoint seq_all (n : nat) : Vector.t (Fin.t n) n :=
+  match n with
+  | 0 => []
+  | S n' => Fin.F1 :: Vector.map Fin.FS (seq_all n')
+  end.
+
+(* CONTEXT *)
+
+Context {var_T mod_name_T met_name_T : Type}.
+Context {read write : met_name_T}.
+Context {read0 read1 write0 write1 : met_name_T}.
+
+(* LANGUAGE SYNTAX *)
+
+Inductive boolop (sz : nat) : Type :=
+| bo_bool (b : bool)
+| bo_input (i : Fin.t sz)
+| bo_not (bo : boolop sz)
+| bo_and (bo1 bo2 : boolop sz)
+| bo_or (bo1 bo2 : boolop sz).
+
+Inductive value (Sig : list (var_T * nat))
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat))) : nat -> Type :=
+| v_const {sz} (bs : Vector.t bool sz)
+  : value Sig M sz
+| v_func {sz sz'} (bos : Vector.t (boolop sz) sz') (arg : value Sig M sz)
+  : value Sig M sz'
+| v_if {sz} (c : value Sig M 1) (t f : value Sig M sz)
+  : value Sig M sz
+| v_var {x sz} (i : InT (x, sz) Sig)
+  : value Sig M sz
+| v_let {x sz sz'} (expr : value Sig M sz) (body : value (cons (x, sz) Sig) M sz')
+  : value Sig M sz
+| v_call {m l n sz sz'} (i : InT (m, l) M) (i' : InT (inl (n, sz, sz')) l) (arg : value Sig M sz)
+  : value Sig M sz'
+| v_abort {sz}
+  : value Sig M sz.
+Arguments v_const {Sig M sz}.
+Arguments v_func {Sig M sz sz'}.
+Arguments v_if {Sig M sz}.
+Arguments v_var {Sig M x sz}.
+Arguments v_let {Sig M x sz sz'}.
+Arguments v_call {Sig M m l n sz sz'}.
+Arguments v_abort {Sig M sz}.
+
+Inductive action (Sig : list (var_T * nat))
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
+  : Type :=
+| a_done
+| a_par (l r : action Sig M)
+| a_if (c : value Sig M 1) (t f : action Sig M)
+| a_let {x sz} (expr : value Sig M sz) (body : action (cons (x, sz) Sig) M)
+| a_call {m l n sz} (i : InT (m, l) M) (i' : InT (inr (n, sz)) l) (arg : value Sig M sz)
+| a_abort.
+Arguments a_done {Sig M}.
+Arguments a_par {Sig M}.
+Arguments a_if {Sig M}.
+Arguments a_let {Sig M}.
+Arguments a_call {Sig M m l n sz}.
+Arguments a_abort {Sig M}.
+
+Record value_method M : Type :=
+  mkvm {
+      name_vm : met_name_T;
+      arg_vm : var_T * nat;
+      sz_vm : nat;
+      body_vm : value (cons arg_vm nil) M sz_vm;
+    }.
+Arguments name_vm {M}.
+Arguments arg_vm {M}.
+Arguments sz_vm {M}.
+Arguments body_vm {M}.
+
+Definition rule M : Type := action nil M.
+
+Record action_method M : Type :=
+  mkam {
+      name_am : met_name_T;
+      arg_am : var_T * nat;
+      body_am : action (cons arg_am nil) M;
+    }.
+Arguments name_am {M}.
+Arguments arg_am {M}.
+Arguments body_am {M}.
+
+(* named method interface of a regular register *)
+Definition nmets_reg sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+  cons (inl (read, 0, sz)) (cons (inr (write, sz)) nil).
+
+(* named method interface of an ephemeral history register *)
+Definition nmets_ehr sz : list (met_name_T * nat * nat + met_name_T * nat) :=
+  cons (inl (read0, 0, sz)) (cons (inr (write0, sz))
+                               (cons (inl (read1, 0, sz)) (cons (inr (write1, sz)) nil))).
+
+(* named method interface of a top-level module's schedule *)
+Fixpoint nmets_top {M} (schedule : list (value_method M + rule M + action_method M))
+  : list (met_name_T * nat * nat + met_name_T * nat) :=
+  match schedule with
+  | nil => nil
+  | cons (inl (inl vm)) schedule' =>
+      cons (inl (name_vm vm, snd (arg_vm vm), sz_vm vm)) (nmets_top schedule')
+  | cons (inl (inr _)) schedule' => nmets_top schedule'
+  | cons (inr am) schedule' => cons (inr (name_am am, snd (arg_am am))) (nmets_top schedule')
+  end.
+
+Inductive module' : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)) ->
+                    list (met_name_T * nat * nat + met_name_T * nat) -> Type :=
+| mod_reg (sz : nat)
+  : module' nil (nmets_reg sz)
+| mod_ehr (sz : nat)
+  : module' nil (nmets_ehr sz)
+| mod_top {M} (schedule : list (value_method M + rule M + action_method M))
+  : module' M (nmets_top schedule)
+| mod_sub {M nmets nmets'} (m : mod_name_T) (sub : module' nil nmets)
+    (m' : module' (cons (m, nmets) M) nmets')
+  : module' M nmets'.
+Arguments mod_top {M}.
+Arguments mod_sub {M nmets nmets'}.
+Definition module := module' nil.
+
+(* CIRCUIT SYNTAX *)
+
+Inductive comb_circuit (I O : nat) : Type :=
+| cc_out (o : Vector.t (Fin.t I) O)
+| cc_bool (b : bool) (tl : comb_circuit (I + 1) O)
+| cc_not (i : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_and (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_or (in1 in2 : Fin.t I) (tl : comb_circuit (I + 1) O)
+| cc_mux (sel tru fal : Fin.t I) (tl : comb_circuit (I + 1) O).
+Arguments cc_out {I O}.
+Arguments cc_bool {I O}.
+Arguments cc_not {I O}.
+Arguments cc_and {I O}.
+Arguments cc_or {I O}.
+Arguments cc_mux {I O}.
+
+(* compute the number of circuit inputs corresponding to unnamed method interface *)
+Fixpoint input (mets : list (nat * nat + nat)) : nat :=
+  match mets with
+  | nil => 0
+  | cons (inl (sz, _)) mets' => (1 + sz) + input mets' (* value method enable + input *)
+  | cons (inr sz) mets' => (1 + sz + 1) + input mets' (* action method enable + input + commit *)
+  end.
+
+(* compute the number of circuit outputs corresponding to unnamed method interface *)
+Fixpoint output (mets : list (nat * nat + nat)) : nat :=
+  match mets with
+  | nil => 0
+  | cons (inl (_, sz)) mets' => (sz + 1) + output mets' (* value method output + abort *)
+  | cons (inr _) mets' => 1 + output mets' (* action method abort *)
+  end.
+
+(* sequential circuit with unnamed method interface *)
+Record seq_circuit (mets : list (nat * nat + nat)) : Type :=
+  mksc {
+      regs_sc : nat;
+      cc_sc : comb_circuit (input mets + regs_sc) (regs_sc + output mets);
+    }.
+Arguments mksc {mets}.
+Arguments regs_sc {mets}.
+Arguments cc_sc {mets}.
+
+(* CIRCUIT DEFINITIONS *)
+
+Definition cc_empty : comb_circuit 0 0 := cc_out [].
+
+Definition cc_false {I} : comb_circuit I 1 := cc_bool false (cc_out [Fin.R _ Fin.F1]).
+
+Definition cc_if {I O} (s : comb_circuit I 1) (t f : comb_circuit I O) : comb_circuit I O.
+Admitted.
+
+Definition cc_pairO {I O1 O2} (cc1 : comb_circuit I O1) (cc2 : comb_circuit I O2)
+  : comb_circuit I (O1 + O2).
+Admitted.
+
+Definition cc_let {I X O} (expr : comb_circuit I X) (body : comb_circuit (I + X) O)
+  : comb_circuit I O.
+Admitted.
+
+Definition sc_empty : seq_circuit nil :=
+  @mksc nil 0 cc_empty.
+
+Definition sc_pair {mets1 mets2} (sc1 : seq_circuit mets1) (sc2 : seq_circuit mets2)
+  : seq_circuit (mets1 ++ mets2).
+Admitted.
+
+(* COMPILE MODULE *)
+
+(* remove names from method interface *)
+Fixpoint anonymize (l : list (met_name_T * nat * nat + met_name_T * nat))
+  : list (nat * nat + nat) :=
+  match l with
+  | nil => nil
+  | cons (inl (_, sz, sz')) l' => cons (inl (sz, sz')) (anonymize l')
+  | cons (inr (_, sz)) l' => cons (inr sz) (anonymize l')
+  end.
+Definition anonymize_all
+  (M : list (mod_name_T * list (met_name_T * nat * nat + met_name_T * nat)))
+  : list (nat * nat + nat) :=
+  flat_map (fun ml => anonymize (snd ml)) M.
+
+(* build the combinational circuit for a regular register
+   comb_circuit (1 + (1 + sz + 1 + 0) + sz) (sz + ((sz + 1) + 1))
+   inputs:
+   - 1 = enable read (ignored)
+   - 1 + sz + 1 = enable write (ignored) + write value + commit write
+   - sz = current value
+   outputs:
+   - sz = commit value
+   - sz + 1 = read value + read abort (always false)
+   - 1 = write abort (always false) *)
+Definition cc_reg'writeval {sz} : comb_circuit (1 + (1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.R _ (Fin.L _ (Fin.L _ (Fin.R _ p))))) (seq_all sz)).
+Definition cc_reg'commit {sz} : comb_circuit (1 + (1 + sz + 1 + 0) + sz) 1 :=
+  cc_out [Fin.L _ (Fin.R _ (Fin.L _ (Fin.R _ Fin.F1)))].
+Definition cc_reg'currval {sz} : comb_circuit (1 + (1 + sz + 1 + 0) + sz) sz :=
+  cc_out (Vector.map (Fin.R _) (seq_all sz)).
+Definition cc_reg sz : comb_circuit (input (anonymize (nmets_reg sz)) + sz)
+                         (sz + output (anonymize (nmets_reg sz))) :=
+  cc_pairO (cc_if cc_reg'commit cc_reg'writeval cc_reg'currval)
+    (cc_pairO (cc_pairO cc_reg'currval cc_false) cc_false).
+
+(* build the combinational circuit for an ephemeral history register
+   comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz)
+                (sz + ((sz + 1) + (1 + ((sz + 1) + 1))))
+   inputs:
+   - 1 = enable read0 (ignored)
+   - 1 + sz + 1 = enable write0 (ignored) + write0 value + commit write0
+   - 1 = enable read1 (ignored)
+   - 1 + sz + 1 = enable write1 (ignored) + write1 value + commit write1
+   - sz = current value
+   outputs:
+   - sz = commit value
+   - sz + 1 = read0 value + read0 abort (always false)
+   - 1 = write0 abort (always false)
+   - sz + 1 = read1 value + read1 abort (always false)
+   - 1 = write1 abort (always false) *)
+Definition cc_ehr'write0val {sz}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.R _ (Fin.L _ (Fin.L _ (Fin.R _ p))))) (seq_all sz)).
+Definition cc_ehr'commit0 {sz}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz) 1 :=
+  cc_out [Fin.L _ (Fin.R _ (Fin.L _ (Fin.R _ Fin.F1)))].
+Definition cc_ehr'write1valX {sz X}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz + X) sz :=
+  cc_out
+    (Vector.map
+       (fun p => Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ (Fin.R _ (Fin.L _ (Fin.L _ (Fin.R _ p))))))))
+       (seq_all sz)).
+Definition cc_ehr'commit1X {sz X}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz + X) 1 :=
+  cc_out [Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ (Fin.R _ (Fin.L _ (Fin.R _ Fin.F1))))))].
+Definition cc_ehr'currval {sz}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz) sz :=
+  cc_out (Vector.map (Fin.R _) (seq_all sz)).
+Definition cc_ehr'currvalX {sz X}
+  : comb_circuit (1 + (1 + sz + 1 + (1 + (1 + sz + 1 + 0))) + sz + X) sz :=
+  cc_out (Vector.map (fun p => Fin.L _ (Fin.R _ p)) (seq_all sz)).
+Definition cc_ehr sz : comb_circuit (input (anonymize (nmets_ehr sz)) + sz)
+                         (sz + output (anonymize (nmets_ehr sz))) :=
+  cc_let (cc_if cc_ehr'commit0 cc_ehr'write0val cc_ehr'currval)
+    (cc_pairO
+       (cc_if cc_ehr'commit1X cc_ehr'write1valX (cc_out (Vector.map (Fin.R _) (seq_all sz))))
+       (cc_pairO (cc_pairO cc_ehr'currvalX cc_false)
+          (cc_pairO cc_false
+             (cc_pairO (cc_pairO (cc_out (Vector.map (Fin.R _) (seq_all sz))) cc_false)
+                cc_false)))).
+
+(* build the combinational circuit for a top-level module's schedule *)
+Definition cc_top' {M} (schedule : list (value_method M + rule M + action_method M))
+  : comb_circuit (input (anonymize (nmets_top schedule)) + output (anonymize_all M))
+      (input (anonymize_all M) + output (anonymize (nmets_top schedule))).
+Admitted.
+Definition cc_top {M} (subs : seq_circuit (anonymize_all M))
+  (schedule : list (value_method M + rule M + action_method M))
+  : comb_circuit (input (anonymize (nmets_top schedule)) + regs_sc subs)
+      (regs_sc subs + output (anonymize (nmets_top schedule))).
+Admitted.
+
+Fixpoint compile' M (subs : seq_circuit (anonymize_all M)) {l} (m' : module' M l)
+  : seq_circuit (anonymize l) :=
+  match m' in module' M l return seq_circuit (anonymize_all M) -> seq_circuit (anonymize l) with
+  | mod_reg sz => fun _ => mksc sz (cc_reg sz)
+  | mod_ehr sz => fun _ => mksc sz (cc_ehr sz)
+  | mod_top schedule => fun subs => mksc (regs_sc subs) (cc_top subs schedule)
+  | mod_sub m sub m' =>
+      fun subs => compile' (cons (m, _) _) (sc_pair (compile' nil sc_empty sub) subs) m'
+  end subs.
+Definition compile {l} (m : module l) : seq_circuit (anonymize l) :=
+  compile' nil sc_empty m.
+
+
+
+
 
 (* Fin.t index of element InT *)
 Fixpoint getFin {A a l} (i : @InT A a l) : Fin.t (length l) :=
@@ -16,38 +312,41 @@ Fixpoint getFin {A a l} (i : @InT A a l) : Fin.t (length l) :=
   | InT_cons _ i => Fin.FS (getFin i)
   end.
 
+(* TODOC *)
+Fixpoint rep {A n} (a : A) : Vector.t A n :=
+  match n with
+  | 0 => []
+  | S n' => a :: rep a
+  end.
+
 (* build a Vector.t from a function on its Fin.t indices *)
 Fixpoint build {A n} (f : Fin.t n -> A) : Vector.t A n :=
   match n as n return (Fin.t n -> A) -> Vector.t A n with
-  | 0 => fun _ => Vector.nil _
-  | S n' => fun f => Vector.cons _ (f Fin.F1) _ (build (fun p => f (Fin.FS p)))
+  | 0 => fun _ => []
+  | S n' => fun f => f Fin.F1 :: build (fun p => f (Fin.FS p))
   end f.
 
 (* destruct a Fin.t (m + n) into a Fin.t m or Fin.t n *)
-Fixpoint LR {m n} (p : Fin.t (m + n)) : Fin.t m + Fin.t n :=
+Fixpoint FinLR {m n} (p : Fin.t (m + n)) : Fin.t m + Fin.t n :=
   match m as m return Fin.t (m + n) -> Fin.t m + Fin.t n with
   | 0 => fun p => inr p
   | S m' => fun p => match p with
                      | Fin.F1 => fun _ => inl Fin.F1
-                     | Fin.FS p' => fun LR => match LR p' with
-                                              | inl pm => inl (Fin.FS pm)
-                                              | inr pn => inr pn
-                                              end
-                     end LR
+                     | Fin.FS p' => fun FinLR => match FinLR p' with
+                                                 | inl pm => inl (Fin.FS pm)
+                                                 | inr pn => inr pn
+                                                 end
+                     end FinLR
   end p.
 
-(* TODO:
-   - type system with complex types
-       (currently each value is only two wires: a data bit and an abort bit)
-   - let-expr in value
-   - let-expr in action
-   - let-expr in comb_circuit (to be used instead of copying circuits all over the place)
-   - might also redefine comb_circuit to have multiple outputs (also to reduce circuit copying)
-   - arbitrary functions in value
-   - read/write ports
-   - inputs to value methods
-       (including the need for a mechanism to ensure that each value method is called only once)
-   - multiple inputs to action methods
+Notation FinL := (Fin.L _).
+Notation FinR := (Fin.R _).
+Notation Fin1 := Fin.F1.
+Notation Fin2 := (Fin.FS Fin.F1).
+
+
+
+(* DOING:
    - mechanism preventing value method calls from violating ORAAT semantics
        (currently value method calls do not consider previously completed actions)
    - mechanism preventing aborting action method calls from violating ORAAT semantics
@@ -55,223 +354,328 @@ Fixpoint LR {m n} (p : Fin.t (m + n)) : Fin.t m + Fin.t n :=
         appropariately abort an entire rule or action method)
    - allow for arbitrary interleaving of value methods, rules, and action methods
        (currently they are always scheduled in the order listed above)
+   - special compilation for value methods with no arguments
+   - primitive modules for registers, phemeral history registers
 *)
 
-Section Lang.
 
-Context {reg_T mod_name_T met_name_T var_T : Type}.
 
 (* COMBINATIONAL CIRCUIT *)
 
-(* a single-output combinational circuit built from I input wires *)
-Inductive comb_circuit (I : nat) : Type :=
-| cc_input (i : Fin.t I)
-| cc_bool (b : bool)
-| cc_not (cc : comb_circuit I)
-| cc_and (cc1 cc2 : comb_circuit I)
-| cc_or (cc1 cc2 : comb_circuit I)
-| cc_mux (sel tru fal : comb_circuit I).
-Arguments cc_input {I}.
-Arguments cc_bool {I}.
-Arguments cc_not {I}.
-Arguments cc_and {I}.
-Arguments cc_or {I}.
-Arguments cc_mux {I}.
+(* TODOC *)
+Definition fmap1 {I I'} (f : Fin.t I -> Fin.t I') : Fin.t (I + 1) -> Fin.t (I' + 1) :=
+  fun p => match FinLR p with
+           | inl pI => FinL (f pI)
+           | inr p1 => FinR p1
+           end.
 
-(* connect each input to another comb_circuit
-   this function can also be interpretted as "map"/"cast" *)
-Fixpoint cc_connect {I I'} (f : Fin.t I -> comb_circuit I') (cc : comb_circuit I)
-  : comb_circuit I' :=
+(* TODOC *)
+Fixpoint cc_map {I I' O} (f : Fin.t I -> Fin.t I') (cc : comb_circuit I O) : comb_circuit I' O :=
   match cc with
-  | cc_input i => f i
-  | cc_bool b => cc_bool b
-  | cc_not cc => cc_not (cc_connect f cc)
-  | cc_and cc1 cc2 => cc_and (cc_connect f cc1) (cc_connect f cc2)
-  | cc_or cc1 cc2 => cc_or (cc_connect f cc1) (cc_connect f cc2)
-  | cc_mux sel tru fal => cc_mux (cc_connect f sel) (cc_connect f tru) (cc_connect f fal)
+  | cc_out o => cc_out (Vector.map f o)
+  | cc_bool b tl => cc_bool b (cc_map (fmap1 f) tl)
+  | cc_not i tl => cc_not (f i) (cc_map (fmap1 f) tl)
+  | cc_and in1 in2 tl => cc_and (f in1) (f in2) (cc_map (fmap1 f) tl)
+  | cc_or in1 in2 tl => cc_or (f in1) (f in2) (cc_map (fmap1 f) tl)
+  | cc_mux sel tru fal tl => cc_mux (f sel) (f tru) (f fal) (cc_map (fmap1 f) tl)
   end.
+
+(* TODOC *)
+Fixpoint cc_connect {I N O} (cc1 : comb_circuit I N) (cc2 : comb_circuit N O)
+  : comb_circuit I O :=
+  match cc1 with
+  | cc_out o => cc_map (Vector.nth o) cc2
+  | cc_bool b tl => cc_bool b (cc_connect tl cc2)
+  | cc_not i tl => cc_not i (cc_connect tl cc2)
+  | cc_and in1 in2 tl => cc_and in1 in2 (cc_connect tl cc2)
+  | cc_or in1 in2 tl => cc_or in1 in2 (cc_connect tl cc2)
+  | cc_mux sel tru fal tl => cc_mux sel tru fal (cc_connect tl cc2)
+  end.
+
+(* TODOC
+   TODO: make this more efficient by only mapping over o once at the end *)
+Fixpoint cc_app {I O O'} (o : Vector.t (Fin.t I) O) (cc : comb_circuit I O')
+  : comb_circuit I (O + O') :=
+  match cc with
+  | cc_out o' => cc_out (o ++ o')
+  | cc_bool b tl => cc_bool b (cc_app (Vector.map FinL o) tl)
+  | cc_not i tl => cc_not i (cc_app (Vector.map FinL o) tl)
+  | cc_and in1 in2 tl => cc_and in1 in2 (cc_app (Vector.map FinL o) tl)
+  | cc_or in1 in2 tl => cc_or in1 in2 (cc_app (Vector.map FinL o) tl)
+  | cc_mux sel tru fal tl => cc_mux sel tru fal (cc_app (Vector.map FinL o) tl)
+  end.
+
+(* TODOC
+   TODO: make this more iefficient by only mapping over cc2 once at the end *)
+Fixpoint cc_pair {I O1 O2} (cc1 : comb_circuit I O1) (cc2 : comb_circuit I O2)
+  : comb_circuit I (O1 + O2) :=
+  match cc1 with
+  | cc_out o => cc_app o cc2
+  | cc_bool b tl => cc_bool b (cc_pair tl (cc_map FinL cc2))
+  | cc_not i tl => cc_not i (cc_pair tl (cc_map FinL cc2))
+  | cc_and in1 in2 tl => cc_and in1 in2 (cc_pair tl (cc_map FinL cc2))
+  | cc_or in1 in2 tl => cc_or in1 in2 (cc_pair tl (cc_map FinL cc2))
+  | cc_mux sel tru fal tl => cc_mux sel tru fal (cc_pair tl (cc_map FinL cc2))
+  end.
+
+(* TODOC *)
+Definition flet {I O} (o : Vector.t (Fin.t I) O) : Fin.t (I + O) -> Fin.t I :=
+  fun p => match FinLR p with
+           | inl pI => pI
+           | inr pO => Vector.nth o pO
+           end.
+
+(* TODOC *)
+Definition flet1 {I O} : Fin.t (I + O) -> Fin.t ((I + 1) + O) :=
+  fun p => match FinLR p with
+           | inl pI => FinL (FinL pI)
+           | inr pO => FinR pO
+           end.
+
+(* TODOC
+   TODO: make this more efficient by only mapping over cc_body once at the end *)
+Fixpoint cc_let {I O O'} (cc_expr : comb_circuit I O) (cc_body : comb_circuit (I + O) O')
+  : comb_circuit I O' :=
+  match cc_expr with
+  | cc_out o => cc_map (flet o) cc_body
+  | cc_bool b tl => cc_bool b (cc_let tl (cc_map flet1 cc_body))
+  | cc_not i tl => cc_not i (cc_let tl (cc_map flet1 cc_body))
+  | cc_and in1 in2 tl => cc_and in1 in2 (cc_let tl (cc_map flet1 cc_body))
+  | cc_or in1 in2 tl => cc_or in1 in2 (cc_let tl (cc_map flet1 cc_body))
+  | cc_mux sel tru fal tl => cc_mux sel tru fal (cc_let tl (cc_map flet1 cc_body))
+  end.
+
+(* TODOC *)
+Fixpoint cc_build {n I} (f : Fin.t n -> comb_circuit I 1) : comb_circuit I n :=
+  match n as n return (Fin.t n -> comb_circuit I 1) -> comb_circuit I n with
+  | 0 => fun _ => cc_out []
+  | S n' => fun f => cc_pair (f Fin.F1) (cc_build (fun p => f (Fin.FS p)))
+  end f.
 
 (* VALUE *)
 
-(* a language value *)
-Inductive value (sig : list var_T) (R : list reg_T) (V : list (mod_name_T * met_name_T))
-  : Type :=
-| v_bool (b : bool)
-| v_not (v : value sig R V)
-| v_and (v1 v2 : value sig R V)
-| v_or (v1 v2 : value sig R V)
-| v_if (c t f : value sig R V)
-| v_var {x : var_T} (i : InT x sig)
-| v_read {r : reg_T} (i : InT r R)
-| v_call {M : mod_name_T} {m : met_name_T} (i : InT (M, m) V)
-| v_abort.
-Arguments v_bool {sig R V}.
-Arguments v_not {sig R V}.
-Arguments v_and {sig R V}.
-Arguments v_or {sig R V}.
-Arguments v_if {sig R V}.
-Arguments v_var {sig R V x}.
-Arguments v_read {sig R V r}.
-Arguments v_call {sig R V M m}.
-Arguments v_abort {sig R V}.
 
-(* data wire of value
-   circuit inputs:
+
+(* circuit inputs:
    - length sig = action method input data wires
    - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires *)
-Fixpoint compile_value_data {sig R V} (v : value sig R V)
-  : comb_circuit (length sig + (length R + length R) + (length V + length V)) :=
+   - length V + length V = value method data wires + abort wires
+   circuit outputs:
+   - 1 = data wire of value
+   - 2 = whether or not value aborts *)
+Fixpoint compile_value {sig R V} (v : value sig R V)
+  : comb_circuit (length sig + (length R + length R) + (length V + length V)) 2 :=
   match v with
-  | v_bool b => cc_bool b
-  | v_not v => cc_not (compile_value_data v)
-  | v_and v1 v2 => cc_and (compile_value_data v1) (compile_value_data v2)
-  | v_or v1 v2 => cc_or (compile_value_data v1) (compile_value_data v2)
-  | v_if c t f => cc_mux (compile_value_data c) (compile_value_data t) (compile_value_data f)
-  | v_var i => cc_input (Fin.L _ (Fin.L _ (getFin i)))
-  | v_read i => cc_input (Fin.L _ (Fin.R _ (Fin.L _ (getFin i))))
-  | v_call i => cc_input (Fin.R _ (Fin.L _ (getFin i)))
-  | v_abort => cc_bool false
-  end.
-
-(* whether or not value aborts
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires *)
-Fixpoint compile_value_abort {sig R V} (v : value sig R V)
-  : comb_circuit (length sig + (length R + length R) + (length V + length V)) :=
-  match v with
-  | v_bool b => cc_bool false
-  | v_not v => compile_value_abort v
-  | v_and v1 v2 => cc_or (compile_value_abort v1) (compile_value_abort v2)
-  | v_or v1 v2 => cc_or (compile_value_abort v1) (compile_value_abort v2)
-  | v_if c t f => cc_or (compile_value_abort c)
-                    (cc_mux (compile_value_data c)
-                       (compile_value_abort t) (compile_value_abort f))
-  | v_var i => cc_bool false
-  | v_read i => cc_input (Fin.L _ (Fin.R _ (Fin.R _ (getFin i))))
-  | v_call i => cc_input (Fin.R _ (Fin.R _ (getFin i)))
-  | v_abort => cc_bool true
+  | v_bool b => match b with
+                | true => cc_bool true (cc_bool false (cc_out [FinL (FinR Fin1); FinR Fin1]))
+                | false => cc_bool false (cc_out [FinR Fin1; FinR Fin1])
+                end
+  | v_not v => cc_connect (compile_value v) (cc_not Fin1 (cc_out [FinR Fin1; FinL Fin2]))
+  | v_and v1 v2 => cc_connect (* N = 2 + 2 *)
+                     (cc_pair (compile_value v1) (compile_value v2))
+                     (cc_pair
+                        (cc_and (FinL Fin1) (FinR Fin1) (cc_out [FinR Fin1])) (* data *)
+                        (cc_or (FinL Fin2) (FinR Fin2) (cc_out [FinR Fin1]))) (* abort *)
+  | v_or v1 v2 => cc_connect (* N = 2 + 2 *)
+                    (cc_pair (compile_value v1) (compile_value v2))
+                    (cc_pair
+                       (cc_or (FinL Fin1) (FinR Fin1) (cc_out [FinR Fin1])) (* data *)
+                       (cc_or (FinL Fin2) (FinR Fin2) (cc_out [FinR Fin1]))) (* abort *)
+  | v_if c t f => cc_connect (* N = 2 + (2 + 2) *)
+                    (cc_pair (compile_value c) (cc_pair (compile_value t) (compile_value f)))
+                    (cc_pair
+                       (cc_mux (FinL Fin1) (FinR (FinL Fin1)) (FinR (FinR Fin1)) (* data *)
+                          (cc_out [FinR Fin1]))
+                       (cc_mux (FinL Fin1) (FinR (FinL Fin2)) (FinR (FinR Fin2)) (* abort *)
+                          (cc_or (FinL (FinL Fin2)) (FinR Fin1) (cc_out [FinR Fin1]))))
+  | v_var i => cc_bool false (cc_out [FinL (FinL (FinL (getFin i))); FinR Fin1])
+  | v_read i => cc_out [FinL (FinR (FinL (getFin i))); FinL (FinR (FinR (getFin i)))]
+  | v_call i => cc_out [FinR (FinL (getFin i)); FinR (FinR (getFin i))]
+  | v_abort => cc_bool false (cc_out [FinR Fin1; FinR Fin1])
   end.
 
 (* ACTION *)
 
-(* a language action *)
-Inductive action (sig : list var_T) (R : list reg_T) (V A : list (mod_name_T * met_name_T))
-  : Type :=
-| a_done
-| a_par (l r : action sig R V A)
-| a_if (c : value sig R V) (t f : action sig R V A)
-| a_write {r : reg_T} (i : InT r R) (arg : value sig R V)
-| a_call {M : mod_name_T} {m : met_name_T} (i : InT (M, m) A) (arg : value sig R V)
-| a_abort.
-Arguments a_done {sig R V A}.
-Arguments a_par {sig R V A}.
-Arguments a_if {sig R V A}.
-Arguments a_write {sig R V A r}.
-Arguments a_call {sig R V A M m}.
-Arguments a_abort {sig R V A}.
 
-(* whether or not action a aborts based on values or self-abort
-   circuit inputs:
+
+(* circuit inputs:
    - length sig = action method input data wires
    - length R + length R = register read data wires + already-written-to wires
    - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_vsabort {sig R V A} (a : action sig R V A)
-  : comb_circuit
-      (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
-  match a with
-  | a_done => cc_bool false
-  | a_par l r => cc_or (compile_action_vsabort l) (compile_action_vsabort r)
-  | a_if c t f => cc_or (F (compile_value_abort c))
-                    (cc_mux (F (compile_value_data c))
-                       (compile_action_vsabort t) (compile_action_vsabort f))
-  | a_write _ arg => F (compile_value_abort arg)
-  | a_call _ arg => F (compile_value_abort arg)
-  | a_abort => cc_bool true
-  end.
-
-(* wire 1 = whether or not action a wants to write to pth register
-   wire 2 = data action a would write to pth register
-   wire 3 = whether or not action a aborts based on multiple writes to pth register
-   note to prove: wire 3 always implies wire 1
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_write {sig R V A} (a : action sig R V A) (p : Fin.t (length R))
+   - length A + length A = action method already-called wires + abort wires
+   circuit outputs:
+   - 1 = whether or not action a aborts based on values or self-abort
+   - length R = whether or not action a wants to write to each register
+   - length R = data action a would write to each register
+   - length R = whether or not action a aborts based on multiple writes to each register
+                note to prove: multi-write abort always implies want for each register
+   - length A = whether or not action a wants to call each action method
+   - length A = data action a would send as argument to each action method
+   - length A = whether or not action a aborts based on multiple calls to each action method
+                note to prove: multi-call abort always implies want for each action method *)
+Fixpoint compile_action {sig R V A} (a : action sig R V A)
   : comb_circuit
       (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
+      (1 + ((length R + length R + length R) + (length A + length A + length A))) :=
   match a with
-  | a_done => (cc_bool false, cc_bool false, cc_bool false)
-  | a_par l r => match compile_action_write l p, compile_action_write r p with
-                 | (ctrl_l, data_l, abort_l), (ctrl_r, data_r, abort_r) =>
-                     (cc_or ctrl_l ctrl_r, cc_mux ctrl_l data_l data_r,
-                       cc_or (cc_and ctrl_l ctrl_r) (cc_or abort_l abort_r))
-                 end
-  | a_if c t f => match compile_action_write t p, compile_action_write f p with
-                  | (ctrl_t, data_t, abort_t), (ctrl_f, data_f, abort_f) =>
-                      (cc_or (cc_and (F (compile_value_data c)) ctrl_t)
-                         (cc_and (cc_not (F (compile_value_data c))) ctrl_f),
-                        cc_mux (F (compile_value_data c)) data_t data_f,
-                        cc_or (cc_and (F (compile_value_data c)) abort_t)
-                         (cc_and (cc_not (F (compile_value_data c))) abort_f))
-                  end
-  | a_write i arg => if Fin.eqb p (getFin i)
-                     then (cc_bool true, F (compile_value_data arg),
-                            cc_input (Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ p)))))
-                     else (cc_bool false, cc_bool false, cc_bool false)
-  | a_call _ _ => (cc_bool false, cc_bool false, cc_bool false)
-  | a_abort => (cc_bool false, cc_bool false, cc_bool false)
-  end.
-
-(* wire 1 = whether or not action a wants to call pth action method
-   wire 2 = data action a would send as argument to pth action method
-   wire 3 = whether or not action a aborts based on multiple calls to pth action method
-   note to prove: wire 3 always implies wire 1
-   circuit inputs:
-   - length sig = action method input data wires
-   - length R + length R = register read data wires + already-written-to wires
-   - length V + length V = value method data wires + abort wires
-   - length A + length A = action method already-called wires + abort wires *)
-Fixpoint compile_action_call {sig R V A} (a : action sig R V A) (p : Fin.t (length A))
-  : comb_circuit
-      (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A))
-    * comb_circuit
-        (length sig + (length R + length R) + (length V + length V) + (length A + length A)) :=
-  let F := cc_connect (fun i => cc_input (Fin.L _ i)) in
-  match a with
-  | a_done => (cc_bool false, cc_bool false, cc_bool false)
-  | a_par l r => match compile_action_call l p, compile_action_call r p with
-                 | (ctrl_l, data_l, abort_l), (ctrl_r, data_r, abort_r) =>
-                     (cc_or ctrl_l ctrl_r, cc_mux ctrl_l data_l data_r,
-                       cc_or (cc_and ctrl_l ctrl_r) (cc_or abort_l abort_r))
-                 end
-  | a_if c t f => match compile_action_call t p, compile_action_call f p with
-                  | (ctrl_t, data_t, abort_t), (ctrl_f, data_f, abort_f) =>
-                      (cc_or (cc_and (F (compile_value_data c)) ctrl_t)
-                         (cc_and (cc_not (F (compile_value_data c))) ctrl_f),
-                        cc_mux (F (compile_value_data c)) data_t data_f,
-                        cc_or (cc_and (F (compile_value_data c)) abort_t)
-                         (cc_and (cc_not (F (compile_value_data c))) abort_f))
-                  end
-  | a_write _ _ => (cc_bool false, cc_bool false, cc_bool false)
-  | a_call i arg => if Fin.eqb p (getFin i)
-                    then (cc_bool true, F (compile_value_data arg),
-                           cc_input (Fin.R _ (Fin.L _ p)))
-                    else (cc_bool false, cc_bool false, cc_bool false)
-  | a_abort => (cc_bool false, cc_bool false, cc_bool false)
+  | a_done => cc_bool false (cc_out (rep (FinR Fin1)))
+  | a_par l r => cc_connect (* N = (1 + (RRR + AAA)) + (1 + (RRR + AAA)) *)
+                   (cc_pair (compile_action l) (compile_action r))
+                   (cc_pair
+                      (cc_or (FinL (FinL Fin1)) (FinR (FinL Fin1)) (cc_out [FinR Fin1]))
+                      (cc_pair (* RRR + AAA *) 
+                         (cc_pair (* RRR *)
+                            (cc_pair
+                               (cc_build (fun r => cc_or
+                                                     (FinL (FinR (FinL (FinL (FinL r)))))
+                                                     (FinR (FinR (FinL (FinL (FinL r)))))
+                                                     (cc_out [FinR Fin1])))
+                               (cc_build (fun r => cc_mux
+                                                     (FinL (FinR (FinL (FinL (FinL r)))))
+                                                     (FinL (FinR (FinL (FinL (FinR r)))))
+                                                     (FinR (FinR (FinL (FinL (FinR r)))))
+                                                     (cc_out [FinR Fin1]))))
+                            (cc_build (fun r => cc_and
+                                                  (FinL (FinR (FinL (FinL (FinL r)))))
+                                                  (FinR (FinR (FinL (FinL (FinL r)))))
+                                                  (cc_or
+                                                     (FinL (FinL (FinR (FinL (FinR r)))))
+                                                     (FinL (FinR (FinR (FinL (FinR r)))))
+                                                     (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                        (cc_out [FinR Fin1]))))))
+                         (cc_pair (* AAA *)
+                            (cc_pair
+                               (cc_build (fun a => cc_or
+                                                     (FinL (FinR (FinR (FinL (FinL a)))))
+                                                     (FinR (FinR (FinR (FinL (FinL a)))))
+                                                     (cc_out [FinR Fin1])))
+                               (cc_build (fun a => cc_mux
+                                                     (FinL (FinR (FinR (FinL (FinL a)))))
+                                                     (FinL (FinR (FinR (FinL (FinR a)))))
+                                                     (FinR (FinR (FinR (FinL (FinR a)))))
+                                                     (cc_out [FinR Fin1]))))
+                            (cc_build (fun a => cc_and
+                                                  (FinL (FinR (FinR (FinL (FinL a)))))
+                                                  (FinR (FinR (FinR (FinL (FinL a)))))
+                                                  (cc_or
+                                                     (FinL (FinL (FinR (FinR (FinR a)))))
+                                                     (FinL (FinR (FinR (FinR (FinR a)))))
+                                                     (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                        (cc_out [FinR Fin1]))))))))
+  | a_if c t f => cc_connect (* N = 2 + ((1 + (RRR + AAA)) + (1 + (RRR + AAA))) *)
+                    (cc_pair
+                       (cc_map FinL (compile_value c))
+                       (cc_pair (compile_action t) (compile_action f)))
+                    (cc_pair
+                       (cc_mux (FinL Fin1) (FinR (FinL (FinL Fin1))) (FinR (FinR (FinL Fin1)))
+                          (cc_or (FinL (FinL Fin2)) (FinR Fin1) (cc_out [FinR Fin1])))
+                       (cc_not (FinL Fin1)
+                          (cc_pair (* RRR + AAA *)
+                             (cc_pair (* RRR *)
+                                (cc_pair
+                                   (cc_build
+                                      (fun r =>
+                                         cc_and
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinL (FinL (FinL r)))))))
+                                           (cc_and
+                                              (FinL (FinR Fin1))
+                                              (FinL (FinL (FinR (FinR (FinR (FinL (FinL (FinL r))))))))
+                                              (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                 (cc_out [FinR Fin1])))))
+                                   (cc_build
+                                      (fun r =>
+                                         cc_mux
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinL (FinL (FinR r)))))))
+                                           (FinL (FinR (FinR (FinR (FinL (FinL (FinR r)))))))
+                                           (cc_out [FinR Fin1]))))
+                                (cc_build
+                                   (fun r =>
+                                      cc_and
+                                        (FinL (FinL Fin1))
+                                        (FinL (FinR (FinL (FinR (FinL (FinR r))))))
+                                        (cc_and
+                                           (FinL (FinR Fin1))
+                                           (FinL (FinL (FinR (FinR (FinR (FinL (FinR r)))))))
+                                           (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                              (cc_out [FinR Fin1]))))))
+                             (cc_pair (* AAA *)
+                                (cc_pair
+                                   (cc_build
+                                      (fun a =>
+                                         cc_and
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinR (FinL (FinL a)))))))
+                                           (cc_and
+                                              (FinL (FinR Fin1))
+                                              (FinL (FinL (FinR (FinR (FinR (FinR (FinL (FinL a))))))))
+                                              (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                                 (cc_out [FinR Fin1])))))
+                                   (cc_build
+                                      (fun a =>
+                                         cc_mux
+                                           (FinL (FinL Fin1))
+                                           (FinL (FinR (FinL (FinR (FinR (FinL (FinR a)))))))
+                                           (FinL (FinR (FinR (FinR (FinR (FinL (FinR a)))))))
+                                           (cc_out [FinR Fin1]))))
+                                (cc_build
+                                   (fun a =>
+                                      cc_and
+                                        (FinL (FinL Fin1))
+                                        (FinL (FinR (FinL (FinR (FinR (FinR a))))))
+                                        (cc_and
+                                           (FinL (FinR Fin1))
+                                           (FinL (FinL (FinR (FinR (FinR (FinR (FinR a)))))))
+                                           (cc_or (FinL (FinR Fin1)) (FinR Fin1)
+                                              (cc_out [FinR Fin1])))))))))
+  | a_write i arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
+                       (cc_map FinL (compile_value arg))
+                       (cc_pair
+                          (cc_out [FinR Fin2])
+                          (cc_pair (* RRR + AAA *)
+                             (cc_pair (* RRR *)
+                                (cc_pair
+                                   (cc_bool true (cc_bool false
+                                                    (cc_out (build (fun r =>
+                                                                      if Fin.eqb r (getFin i)
+                                                                      then FinL (FinR Fin1)
+                                                                      else FinR Fin1)))))
+                                   (cc_bool false (cc_out (build (fun r =>
+                                                                    if Fin.eqb r (getFin i)
+                                                                    then FinL (FinR Fin1)
+                                                                    else FinR Fin1)))))
+                                (cc_bool false
+                                   (cc_out
+                                      (build (fun r =>
+                                                if Fin.eqb r (getFin i)
+                                                then FinL (FinL (FinL (FinL (FinR (FinR r)))))
+                                                else FinR Fin1)))))
+                             (cc_bool false (cc_out (rep (FinR Fin1)))))) (* AAA *)
+  | a_call i arg => cc_let (* I + O = (lengthsig + RR + VV + AA) + 2 *)
+                      (cc_map FinL (compile_value arg))
+                      (cc_pair
+                         (cc_out [FinR Fin2])
+                         (cc_pair (* RRR + AAA *)
+                            (cc_bool false (cc_out (rep (FinR Fin1)))) (* RRR *)
+                            (cc_pair (* AAA *)
+                               (cc_pair
+                                  (cc_bool true (cc_bool false
+                                                   (cc_out (build (fun a =>
+                                                                     if Fin.eqb a (getFin i)
+                                                                     then FinL (FinR Fin1)
+                                                                     else FinR Fin1)))))
+                                  (cc_bool false (cc_out (build (fun a =>
+                                                                   if Fin.eqb a (getFin i)
+                                                                   then FinL (FinR Fin1)
+                                                                   else FinR Fin1)))))
+                               (cc_bool false
+                                  (cc_out
+                                     (build (fun a =>
+                                               if Fin.eqb a (getFin i)
+                                               then FinL (FinL (FinR (FinL a)))
+                                               else FinR Fin1)))))))
+  | a_abort => cc_bool true (cc_bool false (cc_out (FinL (FinR Fin1) :: rep (FinR Fin1))))
   end.
 
 (* whether or not action a aborts based on values, self-abort, multiple writes to the same
@@ -362,14 +766,7 @@ Definition compile_action_abort {sig R V A} (a : action sig R V A)
 
 (* VALUE METHOD *)
 
-(* a language value method *)
-Record value_method R V : Type :=
-  mkvm {
-      name_vm : met_name_T;
-      body_vm : value [] R V;
-    }.
-Arguments name_vm {R V}.
-Arguments body_vm {R V}.
+
 
 (* function to be used with cc_connect
    old circuit inputs:
@@ -570,11 +967,11 @@ Definition compile_rule {acts R V A} (r : rule R V A)
 Record action_method R V A : Type :=
   mkam {
     name_am : met_name_T;
-    arg_am : var_T;
-    body_am : action [arg_am] R V A;
+    args_am : var_T;
+    body_am : action args_am R V A;
     }.
 Arguments name_am {R V A}.
-Arguments arg_am {R V A}.
+Arguments args_am {R V A}.
 Arguments body_am {R V A}.
 
 (* adds action method to beginning of schedule *)
@@ -586,7 +983,7 @@ Definition compile_action_method {acts R V A} (am : action_method R V A)
        (build (fun p =>
                  cc_or (cc_input (Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ p)))))
                    (cc_and (* check enable *)
-                      (cc_input (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ Fin.F1))))))
+                      (cc_input (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ Fin1))))))
                       (cc_connect connect_action (compile_action_write_sel (body_am am) p)))))
        (build (fun p =>
                  cc_mux (cc_input (Fin.L _ (Fin.L _ (Fin.R _ (Fin.R _ p)))))
@@ -595,7 +992,7 @@ Definition compile_action_method {acts R V A} (am : action_method R V A)
        (build (fun p =>
                  cc_or (cc_input (Fin.R _ (Fin.R _ (Fin.L _ p))))
                    (cc_and (* check enable *)
-                      (cc_input (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ Fin.F1))))))
+                      (cc_input (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ (Fin.L _ Fin1))))))
                       (cc_connect connect_action (compile_action_call_sel (body_am am) p)))))
        (build (fun p =>
                  cc_mux (cc_input (Fin.R _ (Fin.R _ (Fin.L _ p))))
@@ -657,17 +1054,24 @@ Definition group {v1 v2 a1 a2} (c1 : seq_circuit v1 a1) (c2 : seq_circuit v2 a2)
 
 (* MODULE *)
 
-(* a language module using children value methods V and children action methods A *)
-Inductive module' V A : list met_name_T -> list met_name_T -> Type :=
-| mk_mod (R : list reg_T) (vms : list (value_method R V)) (rules : list (rule R V A))
-    (ams : list (action_method R V A))
-  : module' V A (map name_vm vms) (map name_am ams)
-| child_mod {vi ai vi' ai'} (M : mod_name_T) (mod : module' [] [] vi ai)
-    (m' : module' (map (pair M) vi ++ V) (map (pair M) ai ++ A) vi' ai')
-  : module' V A vi' ai'.
-Arguments mk_mod {V A}.
-Arguments child_mod {V A vi ai vi' ai'}.
-Definition module := module' [] [].
+Fixpoint l_of_L R M (L : list (value_method R M + rule R M + action_method R M))
+  : list (vm_name_T + am_name_T) :=
+  match L with
+  | nil => nil
+  | inl (inl vm) :: L' => inl (name_vm vm) :: (l_of_L L')
+  | inl (inr _) :: L' => l_of_L L'
+  | inr am :: L' => inr (name_am am) :: (l_of_L L')
+  end.
+
+(* a language module using children M *)
+Inductive module' M : list (vm_name_T + am_name_T) -> Type :=
+| mk_mod (R : list reg_T) (L : list (value_method R M + rule R M + action_method R M))
+  : module' M (l_of_L L)
+| child_mod {l l'} (m : mod_name_T) (child : module' [] l) (m' : module' ((m, l) :: M) l')
+  : module' M l'.
+Arguments mk_mod {M}.
+Arguments child_mod {M l l'}.
+Definition module := module' [].
 
 (* adds list of action methods to schedule *)
 Fixpoint compile_action_methods {R V A} (ams : list (action_method R V A))
@@ -788,7 +1192,7 @@ Fixpoint interpret' {W} (cc : comb_circuit W) : (Fin.t W -> bool) -> bool :=
   | let_cc _ expr body =>
       fun B => interpret' body
                  (fun w => match w in Fin.t (S W) return (Fin.t W -> bool) -> bool -> bool with
-                           | Fin.F1 => fun _ b => b
+                           | Fin1 => fun _ b => b
                            | Fin.FS f => fun B _ => B f
                            end B (interpret' expr B))
   | mux_cc _ sel tru fal => fun B => match interpret' sel B with
